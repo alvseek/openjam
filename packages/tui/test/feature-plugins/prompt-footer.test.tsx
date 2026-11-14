@@ -39,6 +39,7 @@ test("prompt footer separates simultaneous subagent, shell, and usage status", a
       },
       location: {
         model: { list: () => [] },
+        provider: { list: () => [] },
       },
     },
   } as unknown as Context
@@ -114,6 +115,7 @@ test("prompt footer can hide details", async () => {
               id: "message",
               type: "assistant",
               model: { providerID: "provider", id: "model" },
+              time: { created: Date.now() },
               tokens: { input: 1_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
             },
           ],
@@ -122,6 +124,7 @@ test("prompt footer can hide details", async () => {
       shell: { list: () => [] },
       location: {
         model: { list: () => [{ providerID: "provider", id: "model", limit: { context: 10_000 } }] },
+        provider: { list: () => [] },
       },
     },
   } as unknown as Context
@@ -141,7 +144,7 @@ test("prompt footer can hide details", async () => {
 
   try {
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("1.0K (10%) · $1.00")
+    expect(app.captureCharFrame()).toContain("1.0K (10%) · now · $1.00")
     expect(app.captureCharFrame()).toContain("ctrl+p commands")
 
     setShowDetails(false)
@@ -201,7 +204,7 @@ test("prompt footer shows the session's goal without its objective and opens it 
         message: { list: () => [] },
       },
       shell: { list: () => [] },
-      location: { model: { list: () => [] } },
+      location: { model: { list: () => [] }, provider: { list: () => [] } },
     },
   } as unknown as Context
   const app = await testRender(

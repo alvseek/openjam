@@ -1,6 +1,7 @@
 import { Plugin } from "@opencode/plugin/tui"
-import { createMemo, createSignal, Match, Show, Switch } from "solid-js"
+import { createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 import { contextUsage, formatContextUsage } from "../../util/session"
+import { durationCoarse, idleState } from "@opencode/util/duration"
 import { useTerminalDimensions } from "@opentui/solid"
 import { TextAttributes } from "@opentui/core"
 import { useInteractivity } from "../../context/interactivity"
@@ -20,6 +21,11 @@ export function PromptFooter(props: {
 }) {
   const dimensions = useTerminalDimensions()
   const [liveHovered, setLiveHovered] = createSignal(false)
+
+  // The age only moves by the minute, so this ticks like the app's recent-sessions list rather than per second.
+  const [now, setNow] = createSignal(Date.now())
+  const clock = setInterval(() => setNow(Date.now()), 60_000)
+  onCleanup(() => clearInterval(clock))
   const subagents = createMemo(() => {
     if (!props.sessionID) return 0
     const count = props.context.data.session
@@ -42,12 +48,16 @@ export function PromptFooter(props: {
       props.context.data.session.message.list(props.sessionID),
       props.context.data.location.model.list(session.location),
       session.revert?.messageID,
+      props.context.data.location.provider.list(session.location),
     )
     const cost = props.context.data.session.cost(props.sessionID)
+    const idle = usage && idleState({ created: usage.created, ttl: usage.ttl, now: now() })
+    const age = idle ? (durationCoarse(idle.age) ?? "now") : undefined
     return [
-      usage ? formatContextUsage(usage.tokens, usage.percent) : undefined,
-      cost > 0 ? money.format(cost) : undefined,
-    ].filter((item): item is string => Boolean(item))
+      usage ? { text: formatContextUsage(usage.tokens, usage.percent) } : undefined,
+      age === undefined ? undefined : { text: age, warning: idle?.expired === true },
+      cost > 0 ? { text: money.format(cost) } : undefined,
+    ].filter((item): item is { text: string; warning?: boolean } => item !== undefined)
   })
   const live = createMemo(() => Boolean(subagents() || shells()))
   const goal = createGoal(props.context, () => props.sessionID)
@@ -59,7 +69,7 @@ export function PromptFooter(props: {
     if (status().length === 0) return { usage: false, shortcuts: dimensions().width >= 44 }
     return promptFooterLayout({
       width: Math.max(0, dimensions().width - 8),
-      usage: status(),
+      usage: status().map((item) => item.text),
       shortcuts: command ? [`${command} commands`] : [],
     })
   })
@@ -103,7 +113,18 @@ export function PromptFooter(props: {
               <Show when={props.showDetails && layout().usage && status().length > 0}>
                 <text fg={props.context.theme.text.muted} wrapMode="none" flexShrink={0}>
                   <Show when={live() || goal()}> · </Show>
-                  {status().join(" · ")}
+                  <For each={status()}>
+                    {(item, index) => (
+                      <>
+                        <Show when={index() > 0}> · </Show>
+                        <span
+                          style={item.warning ? { fg: props.context.theme.text.feedback.warning.base } : {}}
+                        >
+                          {item.text}
+                        </span>
+                      </>
+                    )}
+                  </For>
                 </text>
               </Show>
             </box>

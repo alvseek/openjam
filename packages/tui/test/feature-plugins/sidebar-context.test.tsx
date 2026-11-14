@@ -21,6 +21,7 @@ function context(options?: { cost?: number; tokens?: number }) {
                     id: "message",
                     type: "assistant",
                     model: { providerID: "provider", id: "model" },
+                    time: { created: Date.now() },
                     tokens: {
                       input: options.tokens,
                       output: 0,
@@ -34,6 +35,7 @@ function context(options?: { cost?: number; tokens?: number }) {
       },
       location: {
         model: { list: () => [] },
+        provider: { list: () => [] },
       },
     },
   } as unknown as Context

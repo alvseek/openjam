@@ -1,4 +1,4 @@
-import { Show, createMemo, type ComponentProps, type JSX } from "solid-js"
+import { Show, createMemo, createSignal, onCleanup, type ComponentProps, type JSX } from "solid-js"
 import { ProgressCircle } from "@opencode/ui/progress-circle"
 import { Button } from "@opencode/ui/button"
 import { Menu } from "@opencode/ui/menu"
@@ -6,6 +6,7 @@ import { Tooltip } from "@opencode/ui/tooltip"
 import { useI18n } from "@opencode/ui/context/i18n"
 import { lastAssistantWithUsage } from "@opencode/client/solid"
 import { usePlugin, type MountedSession } from "@opencode/plugin/gui"
+import { durationCoarse, idleState } from "@opencode/util/duration"
 import { catalogModel, syncCatalog } from "./catalog"
 
 export function SessionContextUsage(props: {
@@ -32,6 +33,11 @@ export function SessionContextUsage(props: {
     props.session.id ? props.session.server.data.session.message.list(props.session.id) : [],
   )
 
+  // The age only moves by the minute, so this ticks like the app's recent-sessions list rather than per second.
+  const [now, setNow] = createSignal(Date.now())
+  const clock = setInterval(() => setNow(Date.now()), 60_000)
+  onCleanup(() => clearInterval(clock))
+
   const usd = createMemo(
     () =>
       new Intl.NumberFormat(i18n.locale(), {
@@ -49,7 +55,8 @@ export function SessionContextUsage(props: {
     const message = lastAssistantWithUsage(messages(), info()?.revert?.messageID)
 
     if (!message) return
-    const model = catalogModel(props.session, message.model)?.model
+    const entry = catalogModel(props.session, message.model)
+    const model = entry?.model
 
     const total =
       message.tokens.input +
@@ -61,7 +68,20 @@ export function SessionContextUsage(props: {
     return {
       total,
       usage: model?.limit.context ? Math.round((total / model.limit.context) * 100) : null,
+      // The provider writes the cache when it reads the request, so the lifetime starts at the message.
+      created: message.time.created,
+      ttl: model?.settings?.cache?.ttl ?? entry?.provider.settings?.cache?.ttl,
     }
+  })
+
+  const idle = createMemo(() => idleState({ created: context()?.created, ttl: context()?.ttl, now: now() }))
+
+  const idleText = createMemo(() => {
+    const state = idle()
+
+    if (!state) return
+
+    return durationCoarse(state.age) ?? ctx.t("usage.now")
   })
 
   const tokens = createMemo(() =>
@@ -74,6 +94,11 @@ export function SessionContextUsage(props: {
   const spent = createMemo(() => (props.session.id ? props.session.server.data.session.cost(props.session.id) : 0))
 
   const cost = createMemo(() => usd().format(spent()))
+
+  // The number's colour carries the state; the tooltip is where it is said in words, for anyone who cannot see it.
+  const tooltip = createMemo(() =>
+    idle()?.expired ? `${ctx.t("usage.toggle")} — ${ctx.t("usage.cacheExpired")}` : ctx.t("usage.toggle"),
+  )
 
   const showCost = createMemo(() => {
     if (spent() > 0) return true
@@ -153,6 +178,7 @@ export function SessionContextUsage(props: {
         <Menu.Content class="w-[200px] max-w-[calc(100vw-16px)]" aria-label={ctx.t("usage.view")}>
           {menuRow(ctx.t("usage.tokens"), context()?.total.toLocaleString(i18n.locale()) ?? "0")}
           <Show when={showCost()}>{menuRow(ctx.t("usage.cost"), cost())}</Show>
+          <Show when={idleText()}>{(text) => menuRow(ctx.t("usage.idle"), text())}</Show>
           {menuRow(ctx.t("usage.usage"), `${context()?.usage ?? 0}%`)}
           <Menu.Separator />
           <Menu.Item onSelect={viewContext}>{ctx.t("usage.view")}</Menu.Item>
@@ -167,7 +193,7 @@ export function SessionContextUsage(props: {
         <Show
           when={variant() === "indicator"}
           fallback={
-            <Tooltip value={ctx.t("usage.toggle")} placement={props.placement ?? "top"}>
+            <Tooltip value={tooltip()} placement={props.placement ?? "top"}>
               <Button
                 type="button"
                 variant="ghost-muted"
@@ -180,6 +206,12 @@ export function SessionContextUsage(props: {
                 <span class="flex items-center gap-2 whitespace-nowrap group-active:text-v2-text-text-muted">
                   {compactCircle()}
                   <span>{tokens()}</span>
+                  <Show when={idleText()}>
+                    <span aria-hidden="true" class="flex w-1.5 shrink-0 items-center justify-center">
+                      ·
+                    </span>
+                    <span classList={{ "text-v2-state-fg-warning": idle()?.expired === true }}>{idleText()}</span>
+                  </Show>
                   <Show when={showCost()}>
                     <span aria-hidden="true" class="flex w-1.5 shrink-0 items-center justify-center">
                       ·

@@ -1,4 +1,4 @@
-import type { ModelInfo, SessionMessageInfo } from "@opencode/client"
+import type { ModelInfo, ProviderInfo, SessionMessageInfo } from "@opencode/client"
 import { lastAssistantWithUsage } from "@opencode/client/solid"
 import { Locale } from "./locale"
 
@@ -47,6 +47,7 @@ export function contextUsage(
   messages: ReadonlyArray<SessionMessageInfo>,
   models: ReadonlyArray<ModelInfo> | undefined,
   boundary?: string,
+  providers?: ReadonlyArray<ProviderInfo>,
 ) {
   const last = lastAssistantWithUsage(messages, boundary)
   if (!last) return
@@ -54,9 +55,13 @@ export function contextUsage(
     last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
   if (tokens <= 0) return
   const model = models?.find((model) => model.providerID === last.model.providerID && model.id === last.model.id)
+  const provider = providers?.find((provider) => provider.id === last.model.providerID)
   return {
     tokens,
     percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : undefined,
+    // The provider writes the cache when it reads the request, so the lifetime starts at the message.
+    created: last.time.created,
+    ttl: model?.settings?.cache?.ttl ?? provider?.settings?.cache?.ttl,
   }
 }
 
