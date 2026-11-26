@@ -1,0 +1,51 @@
+diff --git a/packages/desktop/src/main/service/background-service.ts b/packages/desktop/src/main/service/background-service.ts
+index 7bf76da471d48d5819f87cc39a1c80eec72891a2..ceaadfa28b489168ef9265063a0d51a47b486202 100644
+--- a/packages/desktop/src/main/service/background-service.ts
++++ b/packages/desktop/src/main/service/background-service.ts
+@@ -2,13 +2,14 @@ import { app } from "electron"
+ import type { Endpoint } from "@opencode/client/service"
+ import { Context, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
+ import { SidecarChanged } from "../../shared/ipc-rpc/events"
+-import { CHANNEL } from "../constants"
++import { CHANNEL, OPENJAM } from "../constants"
+ import { emitIpcEvent } from "../ipc-events"
+ import { getMainWindows } from "../windows"
+ import { BackgroundServiceMachine } from "./background-service-machine"
+ import { cleanStages } from "./cli-stages"
+ import { keptStages, serviceVersion, shouldRetryEnsure } from "./cli-version"
+ import { DesktopCli } from "./desktop-cli"
++import { discoverOpenJamService } from "./openjam-service"
+ import { SidecarCredentials } from "./sidecar-credentials"
+ import { takeSidecarProbe } from "./sidecar-probe"
+ 
+@@ -58,6 +59,14 @@ const ensure = Effect.fn("BackgroundService.ensure")(function* (mode: Background
+   const runFork = Effect.runForkWith(yield* Effect.context<FileSystem.FileSystem | Path.Path>())
+   const setup = yield* prepare(mode)
+ 
++  if (OPENJAM) {
++    const service = yield* Effect.tryPromise(() =>
++      discoverOpenJamService({ file: setup.file, version: setup.cli.version }),
++    )
++
++    return (yield* adopt(setup, service, false)).credentials
++  }
++
+   const run = (version = setup.version) =>
+     setup.client.Service.ensure({
+       file: setup.file,
+diff --git a/packages/desktop/src/main/service/openjam-service.ts b/packages/desktop/src/main/service/openjam-service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c501224eeca1ac5e3509921fcff2eb4cdeee425e
+--- /dev/null
++++ b/packages/desktop/src/main/service/openjam-service.ts
+@@ -0,0 +1,10 @@
++import { Service } from "@opencode/client/service"
++
++// Adoption only: ensure() can elect a new owner or replace a mismatched service.
++export async function discoverOpenJamService(options: { readonly file?: string; readonly version: string }) {
++  const endpoint = await Service.discover(options)
++
++  if (!endpoint?.auth) throw new Error("OpenJam requires a running, compatible OpenCode service.")
++
++  return endpoint
++}

@@ -84,25 +84,29 @@ if (process.env.OPENJAM_OUTPUT_DIR) {
 }
 
 async function overlay(from: string, to: string, version: string) {
-  const added = ["script/openjam-signing.ts", "src/main/service/openjam-service.ts", "src/shared/openjam.ts"]
+  const service = "src/main/service/openjam-service.ts"
+  const added = ["script/openjam-signing.ts", "src/shared/openjam.ts"]
+  const modern = ["src/renderer/startup/openjam-i18n.ts", service]
 
-  for (const file of added) {
+  for (const file of [...added, ...(version === "2.3.2" ? [service] : modern)]) {
     if (await exists(path.join(to, file))) throw new Error(`OpenJam overlay would overwrite ${file}`)
   }
 
+  const checkout = path.resolve(to, "../..")
+
   if (version !== "2.3.2") {
-    const checkout = path.resolve(to, "../..")
     const patch = path.join(from, "script/openjam-2.4.2.patch")
 
     await checkOpenJamOverlay(checkout, patch)
     await $`git apply ${patch}`.cwd(checkout)
-    await Promise.all(added.map((file) => copyFile(path.join(from, file), path.join(to, file))))
+    await Promise.all([...added, ...modern].map((file) => copyFile(path.join(from, file), path.join(to, file))))
 
     return
   }
 
   // These are the upstream blobs this overlay was reviewed against. Refuse to overwrite new upstream
   // packaging or service behavior until the overlay is reviewed and refreshed.
+  const background = "src/main/service/background-service.ts"
   const replaced = {
     "electron-builder.config.ts": "d147662ffd346b3f7cb8ae4643a4e6e6098817a4",
     "electron.vite.config.ts": "22aef746259e2864089c6b54d161b88238aded4e",
@@ -110,7 +114,7 @@ async function overlay(from: string, to: string, version: string) {
     "script/pack.ts": "0950d9530447c04696a2350b45a46ca3dd4f6ca3",
     "src/main/constants.ts": "79972677a1f73cb566eb8af5313aea4bf04d71ba",
     "src/main/lifecycle/environment.ts": "2f6e54eff207a60349ff5483d88b567c329b3682",
-    "src/main/service/background-service.ts": "7bf76da471d48d5819f87cc39a1c80eec72891a2",
+    [background]: "7bf76da471d48d5819f87cc39a1c80eec72891a2",
     "src/main/service/sidecar-probe.ts": "5f1ceedbc570e442f4a8057f07dee5aa11c91e0f",
   }
 
@@ -120,7 +124,13 @@ async function overlay(from: string, to: string, version: string) {
     if (blob.trim() !== hash) throw new Error(`OpenJam overlay needs review: upstream ${file} changed`)
   }
 
+  // This renderer predates the startup error codes. Keep the original discovery-only caller and helper together.
+  const patch = path.join(from, "script/openjam-2.3.2.patch")
+
+  await $`git apply ${patch}`.cwd(checkout)
   await Promise.all(
-    [...Object.keys(replaced), ...added].map((file) => copyFile(path.join(from, file), path.join(to, file))),
+    [...Object.keys(replaced).filter((file) => file !== background), ...added].map((file) =>
+      copyFile(path.join(from, file), path.join(to, file)),
+    ),
   )
 }

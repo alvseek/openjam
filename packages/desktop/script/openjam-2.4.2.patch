@@ -221,7 +221,7 @@ index e494c792796955b588cb572443cc24cb4d0e9c6d..fa9d32f821e2fc4497a2d057ada45cf2
  
  // Earlier unpackaged dev runs shared `ai.opencode.desktop.dev`, so Electron's Windows toast
 diff --git a/packages/desktop/src/main/service/background-service.ts b/packages/desktop/src/main/service/background-service.ts
-index a1256c53a9b82780603eecffbee6481b7b18a9eb..1573f5004e3b22932d4b96a575d841d8764b21a5 100644
+index a1256c53a9b82780603eecffbee6481b7b18a9eb..fee89a9305b462a52e0372ed91a429f34aacf9fe 100644
 --- a/packages/desktop/src/main/service/background-service.ts
 +++ b/packages/desktop/src/main/service/background-service.ts
 @@ -2,13 +2,14 @@ import { app } from "electron"
@@ -240,14 +240,25 @@ index a1256c53a9b82780603eecffbee6481b7b18a9eb..1573f5004e3b22932d4b96a575d841d8
  import { SidecarCredentials } from "./sidecar-credentials"
  import { takeSidecarProbe } from "./sidecar-probe"
  
-@@ -58,6 +59,14 @@ const ensure = Effect.fn("BackgroundService.ensure")(function* (mode: Background
+@@ -58,6 +59,25 @@ const ensure = Effect.fn("BackgroundService.ensure")(function* (mode: Background
    const runFork = Effect.runForkWith(yield* Effect.context<FileSystem.FileSystem | Path.Path>())
    const setup = yield* prepare(mode)
  
 +  if (OPENJAM) {
-+    const service = yield* Effect.tryPromise(() =>
-+      discoverOpenJamService({ file: setup.file, version: setup.cli.version }),
-+    )
++    const service = yield* Effect.tryPromise({
++      try: () =>
++        discoverOpenJamService({
++          file: setup.file,
++          version: setup.cli.version,
++          command: [
++            ...setup.cli.command,
++            "serve",
++            "--service",
++            ...(setup.isolated ? ["--hostname", "0.0.0.0", "--port", String(0x0c0c)] : []),
++          ],
++        }),
++      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
++    })
 +
 +    return (yield* adopt(setup, service, false)).credentials
 +  }
@@ -277,3 +288,88 @@ index 5f1ceedbc570e442f4a8057f07dee5aa11c91e0f..fbacc2f13d23e54c0a1bcfce753e08ed
    const version = CHANNEL === "beta" ? undefined : bundledVersion()
  
    if (version === "") return
+diff --git a/packages/desktop/src/renderer/desktop-app.tsx b/packages/desktop/src/renderer/desktop-app.tsx
+index f25542059656fb95b40ea4443def4e3525d8e4c0..66fcc4c46cb294320207bcc398f7091a3f116081 100644
+--- a/packages/desktop/src/renderer/desktop-app.tsx
++++ b/packages/desktop/src/renderer/desktop-app.tsx
+@@ -25,7 +25,12 @@ import { DesktopFirstLaunchOnboarding } from "./onboarding"
+ import { createDesktopPlatform } from "./platform"
+ import { bindDesktopMenu } from "./platform/menu"
+ import { selectTaskbarProgressMode } from "../shared/ipc-contract"
+-import { createSidecarResolver, localServerStartupError, sidecarHttp } from "./startup/initialization"
++import {
++  createSidecarResolver,
++  localServerStartupError,
++  presentStartupError,
++  sidecarHttp,
++} from "./startup/initialization"
+ import { preloadStoredLocale } from "./startup/locale"
+ import {
+   createStartupState,
+@@ -44,6 +49,7 @@ import {
+   type StartupEffect,
+   type StartupEvent,
+ } from "./startup/machine"
++import { openJamStartupTranslator } from "./startup/openjam-i18n"
+ import { LoadingSplash } from "./startup/splash"
+ import { getLastActiveUrl } from "./window/route-storage"
+ import { DesktopMemoryRouter } from "./window/router"
+@@ -71,6 +77,8 @@ export function DesktopApp(props: { api: ElectronAPI; version: string }) {
+   const router = (routerProps: BaseRouterProps) => <DesktopMemoryRouter {...routerProps} windowID={windowState.id} />
+ 
+   function DesktopShell() {
++    const language = useLanguage()
++    const startupT = openJamStartupTranslator(language.locale)
+     const pluginServers = usePluginServers()
+ 
+     createEffect(() => {
+@@ -113,6 +121,8 @@ export function DesktopApp(props: { api: ElectronAPI; version: string }) {
+       <>
+         <Show when={selectStartupFailure(startup.state())} keyed>
+           {(failure) => {
++            if (failure.error instanceof Error) throw presentStartupError(failure.error, startupT)
++
+             throw failure.error
+           }}
+         </Show>
+diff --git a/packages/desktop/src/renderer/startup/initialization.ts b/packages/desktop/src/renderer/startup/initialization.ts
+index 745453cfa9e73d592e7e2d6d873cdc7a3f7150dc..bdded199f457363aef9d3a35f9e0529c2d95312c 100644
+--- a/packages/desktop/src/renderer/startup/initialization.ts
++++ b/packages/desktop/src/renderer/startup/initialization.ts
+@@ -1,4 +1,6 @@
++import { Predicate } from "effect"
+ import type { ElectronAPI } from "../api-types"
++import type { openJamStartupTranslator } from "./openjam-i18n"
+ 
+ type SidecarData = Awaited<ReturnType<ElectronAPI["awaitInitialization"]>>
+ 
+@@ -10,6 +12,29 @@ export function localServerStartupError(cause: unknown) {
+   return failure
+ }
+ 
++/** Only OpenJam emits these startup codes; everything else keeps its original error page details. */
++export function presentStartupError(failure: Error, t: ReturnType<typeof openJamStartupTranslator>) {
++  // The renderer's RPC client wraps a defect whose encoded Error is a plain object, not an Error instance.
++  const cause: unknown = failure.cause
++
++  const message =
++    Predicate.hasProperty(cause, "message") && Predicate.isString(cause.message) ? cause.message : failure.message
++
++  const mismatch = /^OPENJAM_SERVICE_VERSION_MISMATCH:([^:\s]+):([^:\s]+)$/.exec(message)
++
++  if (mismatch) return present(t("openjam.startup.versionMismatch", { required: mismatch[1], observed: mismatch[2] }))
++
++  const unavailable = /^OPENJAM_SERVICE_UNAVAILABLE:([^:\s]+)$/.exec(message)
++
++  if (unavailable) return present(t("openjam.startup.serviceUnavailable", { required: unavailable[1] }))
++
++  return failure
++
++  function present(message: string) {
++    return localServerStartupError(new Error(message, { cause: failure }))
++  }
++}
++
+ // The main process adds Authorization to sidecar requests (`wireRendererHeaders`); the renderer never
+ // holds the password, and its GETs carry only CORS-safelisted headers so they skip the preflight.
+ export function sidecarHttp(data: SidecarData) {

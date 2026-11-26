@@ -62,9 +62,12 @@ requires electron-builder signing and checks the final installer's Authenticode 
 outputs. Electron-builder produces the manifest and blockmap from the final signed bytes.
 `OPENJAM_FEED_URL` can override the feed for loopback HTTP acceptance tests; stock and other remote feeds are rejected.
 
-OpenJam uses its own installer and Electron identity and does not register the stock `opencode://` protocol.
-It only discovers a healthy, authenticated stock service at the bundled CLI version. If none matches, it refuses to
-connect; it never starts, restarts, or replaces that service.
+OpenJam uses its own installer and Electron identity and leaves the `opencode://` protocol to stock OpenCode.
+You can open a rebuilt 2.4.1 or 2.4.2 candidate directly: it reuses the matching shared OpenCode service or starts
+its bundled CLI if the service is absent. Existing conversations stay in the usual OpenCode profile.
+If another version is running, use the OpenJam build matching that service. OpenJam does not stop it.
+The original [unsigned preview downloads](https://github.com/alvseek/openjam/releases/tag/openjam-local-preview-20261126)
+predate this change and still require the matching stock service to be running first.
 
 ## Beta channel
 

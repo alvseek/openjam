@@ -3,8 +3,8 @@
 ## Plan State
 
 - **Source protocol:** `/quick-wizard`, saved mode.
-- **Approval:** PENDING. Alvi selected the installer scope and the desktop-only approach, then requested wrap-up before implementation.
-- **Resume:** Read this plan and the source protocol. Confirm the plan and the QA coverage below before executing or marking any step complete.
+- **Approval:** APPROVED by Alvi on 2026-11-26: “approved. for the implementation, please use /einherjar:dispatch-plan”. This approved the stated QA limitation and both local installer builds. Leave checks better done by Alvi pending with a short walkthrough; continue independent work.
+- **Resume:** Read this plan and the source protocol, then continue from the first unfinished step.
 
 ## Inherited Context
 
@@ -45,15 +45,28 @@ Out of scope: changing the shared client or stock app, cross-version API compati
 
 Read this plan at the start and after compaction. After approval, implement and verify each step in order, recording actual evidence here before moving on.
 
-- [ ] 1. Desktop startup and errors — not started; tests not run.
-- [ ] 2. Process ownership checks — not started; no runtime evidence yet.
-- [ ] 3. Both installers — not built or exercised.
-- [ ] 4. Static review and QA handoff — pending implementation.
+- [x] 1. Desktop startup and errors — main-process helper and caller implemented in `openjam-service.ts` and `background-service.ts`. The bundled command starts only on missing registration or a confirmed dead PID. Authenticated discovery supplies the elected version; live but unverifiable owners are left alone. Both pinned CLIs use the configured fixed service port and register after listening. `desktop-app.tsx` and `startup/initialization.ts` present version-specific or unavailable guidance on the existing error screen; keyed English source is the fallback pending separate translation review. Coordinator ran the helper and machine tests (25 passed) and `ipc-transport.test.ts` (9 passed, including the raw RPC errors). This verifies presentation logic; installed appearance belongs to step 3.
+- [x] 2. Process ownership checks — in isolated temporary profiles, both published CLI versions cold-started, kept the same process on reuse, and read an imported synthetic conversation after restart. A request for the opposite version preserved each owner and returned the expected mismatch. Overlapping same-version calls elected one service for both invocation orders on both versions; the stock command in this check was `serve --service`, not stock desktop `ensure`. In the mixed-version races, both ports had an opposite-version contender start while discovery was pending; both returned the specific mismatch, leaving the winning stock PID (5520 and 31936) and registration unchanged. Worker checked fixture cleanup. Evidence under `%LOCALAPPDATA%/Temp/opencode`: `openjam-owner-fixture-scp3Sf`, `openjam-owner-fixture-GVjphT`.
+- [ ] 3. Both local unsigned installers built from pinned upstream `6f0514052a3c` and `fc31a4853179` with the refreshed guarded overlay. The final builds passed desktop typecheck and 60 focused tests each; 37 packaging/release tests passed in the control checkout. Extraction verified that the final renderer, service startup fixes and exact bundled CLIs shipped; manifests match installer size and SHA-512. The coordinator independently verified SHA-256 and `NotSigned` for both files below. **Installed-app acceptance remains pending**; extraction and direct process checks are not an installed launch.
+- [x] 4. Static review and QA handoff — two runtime findings fixed and checked. Reviewed the packaging changes and recorded the remaining human check below.
 
 ## Quality Review
 
-Pending. No `quality-standard.md` was found during planning. Apply the repository and affected package instructions.
+Independent runtime/UI review found two issues, both addressed. A launched contender's nonzero exit no longer ends discovery before another service can register; both delayed-election regression cases failed before the change and passed afterwards. Startup error copy now has a desktop-owned typed catalog (`openjam-i18n.ts`) using the shared message formatter; feature logic no longer selects locales. The existing app catalog does not have accurate guidance for a mismatch between two V2 versions. English fallback for new keys follows the project's translation workflow. The coordinator reran helper, lifecycle and raw IPC tests together (36 passed); in an additional mixed-version run, OpenJam won both elections, connected to its own version and left both registrations unchanged (fixture `openjam-owner-fixture-8nHkWW`, cleanup verified).
+
+Packaging review covered `openjam-build.ts`, the 2.4.2 and historical 2.3.2 overlay patches, root `.gitattributes`, and the desktop README. New modern-only files remain collision-guarded; the 2.3.2 patch preserves its previous discovery-only implementation. Both patch paths resolve to LF. No project `quality-standard.md` was found. The primary checkout's materialized symlink and unrelated site CSS failures prevent claiming a green repository-wide check; desktop typechecks passed in the actual pinned build trees.
 
 ## QA Handoff
 
-No `qa/` directory or wizard QA bench exists in this checkout; stack status is unknown (no bench probe available). Formal `/integration-test` coverage is therefore unavailable; confirm that limitation at plan approval. The isolated process and installed-app acceptance checks above are still required. No QA checklist or runtime verification has been completed for this change.
+The project has no `qa/qa-map.md` or wizard QA bench; the formal `/integration-test` run and generated wizard checklist were skipped. Real isolated CLI verification is complete; **the installed GUI has not been runtime-verified**. The public preview is unchanged.
+
+| Under `%LOCALAPPDATA%\Temp\opencode` | SHA-256 |
+|---|---|
+| `openjam-startup-final-2.4.1\openjam-desktop-win-x64.exe` | `a0ca182411e8092c50239c5109fb06b52246f41485fa1f1efa1c6b295d0be643` |
+| `openjam-startup-final-2.4.2\openjam-desktop-win-x64.exe` | `f823d8070fac6fff969ed7771a9ac0b471bf0857a2a817431e24bea47295df14` |
+
+**Installed Windows check (Alvi):**
+
+1. In a spare Windows login or VM with no running OpenCode service, install a final candidate and open **OpenJam first**. Expect Home, not an IPC error. Open or create a test conversation, make a model request and check the elapsed-time display. Close/reopen OpenJam and confirm the conversation is still accessible. Repeat from a clean test profile for the other version.
+2. With stock OpenCode running in the test profile, launch the OpenJam candidate matching its version. Confirm the same conversation is accessible in both apps.
+3. Leave that stock service running and open the opposite-version candidate. Expect an error naming both versions and recommending a matching build. Confirm the original stock window can still open the conversation.

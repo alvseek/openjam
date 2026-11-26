@@ -10,6 +10,7 @@ import {
   ServerConnection,
   useCommand,
   useCurrentRoute,
+  useLanguage,
   usePluginServers,
   useTabs,
   type LayoutRoute,
@@ -22,7 +23,12 @@ import type { ElectronAPI } from "./api-types"
 import { DesktopFirstLaunchOnboarding } from "./onboarding"
 import { createDesktopPlatform } from "./platform"
 import { bindDesktopMenu } from "./platform/menu"
-import { createSidecarResolver, localServerStartupError, sidecarHttp } from "./startup/initialization"
+import {
+  createSidecarResolver,
+  localServerStartupError,
+  presentStartupError,
+  sidecarHttp,
+} from "./startup/initialization"
 import { preloadStoredLocale } from "./startup/locale"
 import {
   createStartupState,
@@ -41,6 +47,7 @@ import {
   type StartupEffect,
   type StartupEvent,
 } from "./startup/machine"
+import { openJamStartupTranslator } from "./startup/openjam-i18n"
 import { LoadingSplash } from "./startup/splash"
 import { getLastActiveUrl } from "./window/route-storage"
 import { DesktopMemoryRouter } from "./window/router"
@@ -68,6 +75,8 @@ export function DesktopApp(props: { api: ElectronAPI; version: string }) {
   const router = (routerProps: BaseRouterProps) => <DesktopMemoryRouter {...routerProps} windowID={windowState.id} />
 
   function DesktopShell() {
+    const language = useLanguage()
+    const startupT = openJamStartupTranslator(language.locale)
     const pluginServers = usePluginServers()
 
     createEffect(() => {
@@ -110,6 +119,8 @@ export function DesktopApp(props: { api: ElectronAPI; version: string }) {
       <>
         <Show when={selectStartupFailure(startup.state())} keyed>
           {(failure) => {
+            if (failure.error instanceof Error) throw presentStartupError(failure.error, startupT)
+
             throw failure.error
           }}
         </Show>

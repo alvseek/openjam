@@ -60,9 +60,20 @@ const ensure = Effect.fn("BackgroundService.ensure")(function* (mode: Background
   const setup = yield* prepare(mode)
 
   if (OPENJAM) {
-    const service = yield* Effect.tryPromise(() =>
-      discoverOpenJamService({ file: setup.file, version: setup.cli.version }),
-    )
+    const service = yield* Effect.tryPromise({
+      try: () =>
+        discoverOpenJamService({
+          file: setup.file,
+          version: setup.cli.version,
+          command: [
+            ...setup.cli.command,
+            "serve",
+            "--service",
+            ...(setup.isolated ? ["--hostname", "0.0.0.0", "--port", String(0x0c0c)] : []),
+          ],
+        }),
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+    })
 
     return (yield* adopt(setup, service, false)).credentials
   }

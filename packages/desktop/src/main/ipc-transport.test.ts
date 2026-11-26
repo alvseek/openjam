@@ -6,13 +6,71 @@ import { Deferred, Effect, Layer, ManagedRuntime, Predicate, Schema, Stream } fr
 import { Rpc, RpcGroup, RpcMessage, RpcServer } from "effect/rpc"
 import { Transferable } from "effect/workers"
 import { omitUndefined } from "../shared/ipc-transport"
+import { AppAwaitInitialization } from "../shared/ipc-rpc/app"
 import { EventRpcs, MenuCommandTriggered } from "../shared/ipc-rpc/events"
 import { FilesOpenFilePicker } from "../shared/ipc-rpc/files"
+import { localServerStartupError, presentStartupError } from "../renderer/startup/initialization"
+import { openJamStartupTranslator } from "../renderer/startup/openjam-i18n"
 import { emitIpcEvent } from "./ipc-events"
 import { eventHandlers } from "./ipc-handlers/events"
 import { IpcPortHandoff, IpcServerProtocolLive } from "./ipc-transport"
 
 describe("desktop RPC transport", () => {
+  test.each([
+    {
+      message: "OPENJAM_SERVICE_VERSION_MISMATCH:2.4.2:2.4.1",
+      expected:
+        "OpenJam bundles service version 2.4.2, but the running OpenCode service is version 2.4.1. OpenJam left it running. Use an OpenJam build that matches the running OpenCode service.",
+    },
+    {
+      message: "OPENJAM_SERVICE_UNAVAILABLE:2.4.2",
+      expected:
+        "OpenJam could not reach or verify the local OpenCode service. This OpenJam build requires service version 2.4.2. Wait a moment and retry. If the problem persists, run opencode service status to check the service.",
+    },
+    { message: "Cannot migrate session_message projections" },
+    { message: "OPENJAM_SERVICE_VERSION_MISMATCH:2.4.2:" },
+  ])("presents an initialization failure from the RPC wire: $message", async ({ message, expected }) => {
+    const rpcs = RpcGroup.make(AppAwaitInitialization)
+    const handlers = rpcs.toLayer({ AppAwaitInitialization: () => Effect.die(new Error(message)) })
+
+    const runtime = ManagedRuntime.make(
+      RpcServer.layer(rpcs, { disableFatalDefects: true }).pipe(
+        Layer.provide(handlers),
+        Layer.provideMerge(IpcServerProtocolLive),
+      ),
+    )
+
+    const channel = new MessageChannel()
+
+    try {
+      const handoff = await runtime.runPromise(IpcPortHandoff)
+      handoff.bind(sender(1), serverPort(channel.port1))
+      const reply = await call(channel.port2, 0, "AppAwaitInitialization", null)
+      expect(reply.exit).toEqual(died({ name: "Error", message }))
+
+      if (!Predicate.isTagged(reply.exit, "Failure")) throw new Error("Expected a failed RPC")
+      const reason = reply.exit.cause[0]
+
+      if (!reason || !Predicate.isTagged(reason, "Die")) throw new Error("Expected an encoded defect")
+
+      const failure = localServerStartupError(new Error("Desktop IPC handler failed", { cause: reason.defect }))
+
+      const presented = presentStartupError(
+        failure,
+        openJamStartupTranslator(() => "de"),
+      )
+
+      if (!expected) return expect(presented).toBe(failure)
+
+      expect(presented.message).toBe(expected)
+      expect(presented).toHaveProperty("localServerStartup", true)
+      expect(presented).toHaveProperty("cause", failure)
+    } finally {
+      channel.port2.close()
+      await runtime.dispose()
+    }
+  })
+
   test("decodes renderer payloads whose optional fields are undefined", async () => {
     let received: unknown
     const rpcs = RpcGroup.make(FilesOpenFilePicker)
