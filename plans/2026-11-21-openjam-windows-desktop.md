@@ -1,8 +1,9 @@
 # Quick Wizard plan: OpenJam for Windows desktop
 
 Status: installer and release workflow implemented locally; signed installed A-to-B acceptance
-and hosted release verification pending. Nothing is installed or published. Automatic publication
-remains disabled. Use the **final candidates** at the end of the execution log, not the earlier build paths.
+and hosted release verification pending. The [unsigned Windows preview](https://github.com/alvseek/openjam/releases/tag/openjam-local-preview-20261126)
+is public for manual download. It has no updater manifest; automatic publication remains disabled.
+Use the **final candidates** at the end of the execution log, not the earlier build paths.
 
 ## Inherited context
 
@@ -338,4 +339,6 @@ stock 2.4.2; private A/B acceptance can keep both candidates on a 2.4.1 base.
 source with different desktop versions and `OPENJAM_FEED_URL=http://127.0.0.1:4313/`.
 Then follow **QA handoff** above. Keep public promotion disabled until the hosted signing run,
 installed update, existing conversation, matching service, timer, and intact stock app are verified.
-The implementation remains local and uncommitted.
+The implementation is committed locally as `74e19a3fdf` on `feat/session-cache-age`. The normal
+push was blocked by the existing site CSS check. The prerelease tag's source archive does not
+include that commit; the two downloadable installers match the hashes above.
