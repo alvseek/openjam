@@ -2,13 +2,14 @@ import { app } from "electron"
 import type { Endpoint } from "@opencode/client/service"
 import { Context, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
 import { SidecarChanged } from "../../shared/ipc-rpc/events"
-import { CHANNEL } from "../constants"
+import { CHANNEL, OPENJAM } from "../constants"
 import { emitIpcEvent } from "../ipc-events"
 import { getMainWindows } from "../windows"
 import { BackgroundServiceMachine } from "./background-service-machine"
 import { cleanStages } from "./cli-stages"
 import { keptStages, serviceVersion, shouldRetryEnsure } from "./cli-version"
 import { DesktopCli } from "./desktop-cli"
+import { discoverOpenJamService } from "./openjam-service"
 import { SidecarCredentials } from "./sidecar-credentials"
 import { takeSidecarProbe } from "./sidecar-probe"
 
@@ -57,6 +58,14 @@ const probe = Effect.fn("BackgroundService.probe")(function* () {
 const ensure = Effect.fn("BackgroundService.ensure")(function* (mode: BackgroundServiceMachine.ConnectMode) {
   const runFork = Effect.runForkWith(yield* Effect.context<FileSystem.FileSystem | Path.Path>())
   const setup = yield* prepare(mode)
+
+  if (OPENJAM) {
+    const service = yield* Effect.tryPromise(() =>
+      discoverOpenJamService({ file: setup.file, version: setup.cli.version }),
+    )
+
+    return (yield* adopt(setup, service, false)).credentials
+  }
 
   const run = (version = setup.version) =>
     setup.client.Service.ensure({

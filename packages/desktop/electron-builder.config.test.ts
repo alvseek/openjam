@@ -18,25 +18,54 @@ const channels = [
   { channel: "prod", appId: "ai.opencode.desktop", feed: "latest" },
 ] as const
 
-function load(channel: string, target?: string): Configuration {
+function load(channel: string, target?: string, flavor?: string): Configuration {
   const previous = process.env.OPENCODE_CHANNEL
   const previousTarget = process.env.OPENCODE_TARGET
+  const previousFlavor = process.env.OPENCODE_DESKTOP_FLAVOR
   process.env.OPENCODE_CHANNEL = channel
 
   if (target !== undefined) process.env.OPENCODE_TARGET = target
   else delete process.env.OPENCODE_TARGET
+
+  if (flavor !== undefined) process.env.OPENCODE_DESKTOP_FLAVOR = flavor
+  else delete process.env.OPENCODE_DESKTOP_FLAVOR
 
   try {
     return getConfig()
   } finally {
     delete process.env.OPENCODE_CHANNEL
     delete process.env.OPENCODE_TARGET
+    delete process.env.OPENCODE_DESKTOP_FLAVOR
 
     if (previous !== undefined) process.env.OPENCODE_CHANNEL = previous
 
     if (previousTarget !== undefined) process.env.OPENCODE_TARGET = previousTarget
+
+    if (previousFlavor !== undefined) process.env.OPENCODE_DESKTOP_FLAVOR = previousFlavor
   }
 }
+
+test("OpenJam packages as a separate per-user x64 app and retains updater publisher verification", () => {
+  expect(load("prod", "windows-x64", "openjam")).toMatchObject({
+    appId: "io.github.alvseek.openjam",
+    productName: "OpenJam",
+    artifactName: "openjam-desktop-${os}-${arch}.${ext}",
+    extraMetadata: { name: "openjam-desktop" },
+    protocols: [],
+    win: {
+      target: ["nsis"],
+      verifyUpdateCodeSignature: true,
+      signtoolOptions: { publisherName: [process.env.OPENJAM_PUBLISHER_NAME ?? "OpenJam"] },
+    },
+    nsis: { oneClick: true, perMachine: false },
+    publish: {
+      provider: "generic",
+      url: "https://github.com/alvseek/openjam/releases/latest/download/",
+      channel: "latest",
+    },
+  })
+  expect(() => load("prod", "windows-arm64", "openjam")).toThrow("only packages Windows x64")
+})
 
 function trimFilter(dir: string, config: Configuration) {
   const patterns = Array.isArray(config.files) ? config.files.flatMap((value) => (value ? [String(value)] : [])) : []

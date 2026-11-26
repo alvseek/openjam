@@ -1,0 +1,279 @@
+diff --git a/packages/desktop/electron-builder.config.ts b/packages/desktop/electron-builder.config.ts
+index d4697d917dcdfa05fa6aa1df5c1fea7baead7d00..9aa1eb9fecb965adce270ef47b9d4e54a45e4b8f 100644
+--- a/packages/desktop/electron-builder.config.ts
++++ b/packages/desktop/electron-builder.config.ts
+@@ -6,7 +6,9 @@ import { Arch, type Configuration } from "electron-builder"
+ import { NativeArch } from "../../script/native-arch"
+ import { DESKTOP_NATIVE_ENGLISH } from "@opencode/app/i18n/desktop-native"
+ import { CLI_BINARIES, getCurrentCli, nodePtyPackage } from "./script/utils"
++import { openJamSigning } from "./script/openjam-signing"
+ import { previewBinding, verifyPreviewBinding } from "./script/preview-binding"
++import { OPENJAM_FEED, OPENJAM_ID, OPENJAM_NAME, OPENJAM_PACKAGE } from "./src/shared/openjam"
+ 
+ const packageDir = path.dirname(fileURLToPath(import.meta.url))
+ 
+@@ -233,6 +235,29 @@ const getBase = (appId: string): Configuration => {
+ }
+ 
+ export function getConfig() {
++  if (process.env.OPENCODE_DESKTOP_FLAVOR === "openjam") {
++    if (getCurrentCli().target !== "windows-x64") throw new Error("OpenJam only packages Windows x64")
++
++    const base = getBase(OPENJAM_ID)
++    const signing = openJamSigning()
++
++    return {
++      ...base,
++      appId: OPENJAM_ID,
++      productName: OPENJAM_NAME,
++      artifactName: "openjam-desktop-${os}-${arch}.${ext}",
++      extraMetadata: { ...base.extraMetadata, name: OPENJAM_PACKAGE, productName: OPENJAM_NAME },
++      protocols: [],
++      win: {
++        ...base.win,
++        verifyUpdateCodeSignature: true,
++        forceCodeSigning: signing.required,
++        signtoolOptions: { publisherName: [signing.publisher], certificateSha1: signing.certificateSha1 },
++      },
++      publish: { provider: "generic", url: openJamFeed(), channel: "latest" },
++    }
++  }
++
+   const channel = resolveChannel()
+   const appId = APP_IDS[channel]
+   const base = getBase(appId)
+@@ -299,3 +324,23 @@ export function getConfig() {
+ }
+ 
+ export default getConfig()
++
++function openJamFeed() {
++  const url = new URL(process.env.OPENJAM_FEED_URL ?? OPENJAM_FEED)
++
++  if (url.href === OPENJAM_FEED) return url.href
++
++  // Local updater acceptance can use its own loopback feed, but not the stock feed.
++  if (
++    url.protocol === "http:" &&
++    (url.hostname === "127.0.0.1" || url.hostname === "[::1]") &&
++    !url.username &&
++    !url.password &&
++    !url.search &&
++    !url.hash &&
++    url.pathname.endsWith("/")
++  )
++    return url.href
++
++  throw new Error("OpenJam updates require the OpenJam release feed or an HTTP loopback test feed")
++}
+diff --git a/packages/desktop/electron.vite.config.ts b/packages/desktop/electron.vite.config.ts
+index 22aef746259e2864089c6b54d161b88238aded4e..cd133168dfee30eabb218b83ffe67a4bb7db2501 100644
+--- a/packages/desktop/electron.vite.config.ts
++++ b/packages/desktop/electron.vite.config.ts
+@@ -45,6 +45,7 @@ export default defineConfig(({ command }) => {
+       define: {
+         // Local renderer/server mode still uses the dev application identity and updater policy.
+         "import.meta.env.OPENCODE_CHANNEL": JSON.stringify(channel === "local" ? "dev" : channel),
++        "import.meta.env.OPENCODE_DESKTOP_FLAVOR": JSON.stringify(process.env.OPENCODE_DESKTOP_FLAVOR ?? ""),
+       },
+       build: {
+         minify: command === "build",
+diff --git a/packages/desktop/script/build.ts b/packages/desktop/script/build.ts
+index 6d55837c17034037edf266a96b14ad89577f76bb..0c5dc58f4a2b698736dadee064530ff1f76f40b2 100644
+--- a/packages/desktop/script/build.ts
++++ b/packages/desktop/script/build.ts
+@@ -22,12 +22,18 @@ await $`bun ./script/copy-metainfo.ts ${channel}`
+ 
+ const built = await exists(path.join(cli, getCurrentCli().package.replace("@opencode/", "")))
+ 
+-if (channel === "prod" && !built)
++const openjam = process.env.OPENCODE_DESKTOP_FLAVOR === "openjam"
++
++if (channel === "prod" && !built && !openjam)
+   throw new Error(`Production desktop builds bundle the CLI from ${cli}; build it first`)
+ 
+-if (built) await copyBuiltCliToResources(cli)
++if (openjam) {
++  // The candidate's app version can advance independently of the stock service it adopts.
++  const { version } = await Bun.file("package.json").json()
+ 
+-if (!built) await downloadCliToResources(channel === "beta" ? "beta" : undefined)
++  await downloadCliToResources(version)
++} else if (built) await copyBuiltCliToResources(cli)
++else await downloadCliToResources(channel === "beta" ? "beta" : undefined)
+ 
+ await $`bunx electron-vite build`
+ 
+diff --git a/packages/desktop/script/pack.ts b/packages/desktop/script/pack.ts
+index 0950d9530447c04696a2350b45a46ca3dd4f6ca3..cb9f6ac9a6a7bca9517d7d6b546e6fdae381e97b 100644
+--- a/packages/desktop/script/pack.ts
++++ b/packages/desktop/script/pack.ts
+@@ -4,6 +4,8 @@ import { cp, mkdir, readdir, rm } from "node:fs/promises"
+ import path from "node:path"
+ import { getConfig } from "../electron-builder.config"
+ import { getCurrentCli, resolveChannel } from "./utils"
++import { OPENJAM_PACKAGE } from "../src/shared/openjam"
++import { openJamSigning } from "./openjam-signing"
+ 
+ // Packages the built app (out/) for OPENCODE_TARGET into dist/desktop at the repository root, unsigned:
+ // macOS: the .app as a tarball. Windows: the unpacked app in app/, or with OPENCODE_DESKTOP_APP, the NSIS
+@@ -22,6 +24,8 @@ const os =
+ 
+ const app = process.env.OPENCODE_DESKTOP_APP
+ 
++const openjam = process.env.OPENCODE_DESKTOP_FLAVOR === "openjam"
++
+ const flags = [`--${os}`, `--${cli.cpu}`, "--publish", "never", "--config", "electron-builder.config.ts"]
+ 
+ process.chdir(dir)
+@@ -36,7 +40,15 @@ if (app) {
+   // The installer uses the channel's icons; the rest of the app is already built and signed.
+   await $`bun ./script/copy-icons.ts ${resolveChannel()}`
+   await $`bunx electron-builder ${flags} --prepackaged ${app}`
+-  await cp(`dist/opencode-desktop-win-${cli.cpu}.exe`, path.join(out, `opencode-desktop-win-${cli.cpu}.exe`))
++  const installer = `${openjam ? OPENJAM_PACKAGE : "opencode-desktop"}-win-${cli.cpu}.exe`
++
++  await cp(`dist/${installer}`, path.join(out, installer))
++
++  if (openjam) {
++    // These describe the candidate bytes. Recompute them if signing changes the installer.
++    await cp("dist/latest.yml", path.join(out, "latest.yml"))
++    await cp(`dist/${installer}.blockmap`, path.join(out, `${installer}.blockmap`))
++  }
+ }
+ 
+ if (!app && os === "linux") {
+@@ -66,7 +78,12 @@ if (!app && os === "win") {
+ // electron-updater reads its feed from that file, so write the one those targets would.
+ async function writeUpdateConfig(resources: string) {
+   const publish = getConfig().publish
+-  const name: string = (await Bun.file("package.json").json()).name
++  const name: string = openjam ? OPENJAM_PACKAGE : (await Bun.file("package.json").json()).name
++
++  const publisher = openjam
++    ? [`publisherName: ${JSON.stringify([openJamSigning().publisher])}`]
++    : []
++
+   await Bun.write(
+     path.join(resources, "app-update.yml"),
+     [
+@@ -74,6 +91,7 @@ async function writeUpdateConfig(resources: string) {
+       `url: ${publish.url}`,
+       `channel: ${publish.channel}`,
+       `updaterCacheDirName: '${name.replace(/[/\\:*?"<>|]/g, "").toLowerCase()}-updater'`,
++      ...publisher,
+     ].join("\n") + "\n",
+   )
+ }
+diff --git a/packages/desktop/src/main/constants.ts b/packages/desktop/src/main/constants.ts
+index 7b47b120844009bf69cba1da1b3058000445e31c..61109e56d40061906f0399f34a0b385a23a494cc 100644
+--- a/packages/desktop/src/main/constants.ts
++++ b/packages/desktop/src/main/constants.ts
+@@ -1,5 +1,8 @@
+ import { app } from "electron"
+ import { resolveIdentity, type Channel } from "./identity"
++import { OPENJAM_ID, OPENJAM_NAME } from "../shared/openjam"
++
++export const OPENJAM = import.meta.env.OPENCODE_DESKTOP_FLAVOR === "openjam"
+ 
+ const raw = import.meta.env.OPENCODE_CHANNEL
+ 
+@@ -7,7 +10,9 @@ export const CHANNEL: Channel = raw === "local" || raw === "dev" || raw === "bet
+ 
+ export const VERSION = app.isPackaged ? app.getVersion() : (process.env.OPENCODE_VERSION ?? app.getVersion())
+ 
+-const identity = resolveIdentity(CHANNEL, app.isPackaged)
++const identity = OPENJAM
++  ? { appName: OPENJAM_NAME, appID: OPENJAM_ID, appUserModelID: OPENJAM_ID }
++  : resolveIdentity(CHANNEL, app.isPackaged)
+ 
+ export const APP_NAME = identity.appName
+ 
+diff --git a/packages/desktop/src/main/lifecycle/environment.ts b/packages/desktop/src/main/lifecycle/environment.ts
+index e494c792796955b588cb572443cc24cb4d0e9c6d..fa9d32f821e2fc4497a2d057ada45cf2db164648 100644
+--- a/packages/desktop/src/main/lifecycle/environment.ts
++++ b/packages/desktop/src/main/lifecycle/environment.ts
+@@ -3,7 +3,7 @@ import http from "node:http"
+ import { getCACertificates, setDefaultCACertificates } from "node:tls"
+ import { app, shell } from "electron"
+ import { Effect, Path } from "effect"
+-import { APP_USER_MODEL_ID } from "../constants"
++import { APP_USER_MODEL_ID, OPENJAM } from "../constants"
+ import { isCollidingDevShortcut } from "../identity"
+ import { DesktopPaths } from "../paths"
+ import { getUserShell, loadShellEnv } from "../service/shell-env"
+@@ -62,7 +62,7 @@ export const prepareDesktop = Effect.gen(function* () {
+   const path = yield* Path.Path
+   const paths = yield* DesktopPaths.resolve
+ 
+-  if (app.isPackaged || process.env.OPENCODE_DESKTOP_DISABLE_PROTOCOL_REGISTRATION !== "1")
++  if (!OPENJAM && (app.isPackaged || process.env.OPENCODE_DESKTOP_DISABLE_PROTOCOL_REGISTRATION !== "1"))
+     app.setAsDefaultProtocolClient("opencode")
+   const runFork = Effect.runForkWith(yield* Effect.context())
+   setProtocolReporter((level, message, data) =>
+@@ -71,7 +71,7 @@ export const prepareDesktop = Effect.gen(function* () {
+   registerRendererProtocol(paths.rendererRoot)
+   setDockIcon(path, paths)
+   applySpellcheck()
+-  yield* removeCollidingDevShortcut
++  if (!OPENJAM) yield* removeCollidingDevShortcut
+ })
+ 
+ // Earlier unpackaged dev runs shared `ai.opencode.desktop.dev`, so Electron's Windows toast
+diff --git a/packages/desktop/src/main/service/background-service.ts b/packages/desktop/src/main/service/background-service.ts
+index a1256c53a9b82780603eecffbee6481b7b18a9eb..1573f5004e3b22932d4b96a575d841d8764b21a5 100644
+--- a/packages/desktop/src/main/service/background-service.ts
++++ b/packages/desktop/src/main/service/background-service.ts
+@@ -2,13 +2,14 @@ import { app } from "electron"
+ import type { Endpoint } from "@opencode/client/service"
+ import { Context, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
+ import { SidecarChanged } from "../../shared/ipc-rpc/events"
+-import { CHANNEL } from "../constants"
++import { CHANNEL, OPENJAM } from "../constants"
+ import { emitIpcEvent } from "../ipc-events"
+ import { getMainWindows } from "../windows"
+ import { BackgroundServiceMachine } from "./background-service-machine"
+ import { cleanStages } from "./cli-stages"
+ import { keptStages, serviceVersion, shouldRetryEnsure } from "./cli-version"
+ import { DesktopCli } from "./desktop-cli"
++import { discoverOpenJamService } from "./openjam-service"
+ import { SidecarCredentials } from "./sidecar-credentials"
+ import { takeSidecarProbe } from "./sidecar-probe"
+ 
+@@ -58,6 +59,14 @@ const ensure = Effect.fn("BackgroundService.ensure")(function* (mode: Background
+   const runFork = Effect.runForkWith(yield* Effect.context<FileSystem.FileSystem | Path.Path>())
+   const setup = yield* prepare(mode)
+ 
++  if (OPENJAM) {
++    const service = yield* Effect.tryPromise(() =>
++      discoverOpenJamService({ file: setup.file, version: setup.cli.version }),
++    )
++
++    return (yield* adopt(setup, service, false)).credentials
++  }
++
+   const run = (version = setup.version) =>
+     setup.client.Service.ensure({
+       file: setup.file,
+diff --git a/packages/desktop/src/main/service/sidecar-probe.ts b/packages/desktop/src/main/service/sidecar-probe.ts
+index 5f1ceedbc570e442f4a8057f07dee5aa11c91e0f..fbacc2f13d23e54c0a1bcfce753e08eda3504576 100644
+--- a/packages/desktop/src/main/service/sidecar-probe.ts
++++ b/packages/desktop/src/main/service/sidecar-probe.ts
+@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs"
+ import path from "node:path"
+ import { app } from "electron"
+ import type { Endpoint } from "@opencode/client/service"
+-import { CHANNEL } from "../constants"
++import { CHANNEL, OPENJAM } from "../constants"
+ 
+ // The main thread idles between showing the first window and evaluating the main bundle, waiting
+ // for the renderer's asset requests. That slot is long enough to find out whether a compatible
+@@ -12,7 +12,7 @@ import { CHANNEL } from "../constants"
+ let probe: Promise<Endpoint | undefined> | undefined
+ 
+ export function startSidecarProbe() {
+-  if (!app.isPackaged) return
++  if (!app.isPackaged || OPENJAM) return
+   const version = CHANNEL === "beta" ? undefined : bundledVersion()
+ 
+   if (version === "") return

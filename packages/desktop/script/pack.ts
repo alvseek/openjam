@@ -4,6 +4,8 @@ import { cp, mkdir, readdir, rm } from "node:fs/promises"
 import path from "node:path"
 import { getConfig } from "../electron-builder.config"
 import { getCurrentCli, resolveChannel } from "./utils"
+import { OPENJAM_PACKAGE } from "../src/shared/openjam"
+import { openJamSigning } from "./openjam-signing"
 
 // Packages the built app (out/) for OPENCODE_TARGET into dist/desktop at the repository root, unsigned:
 // macOS: the .app as a tarball. Windows: the unpacked app in app/, or with OPENCODE_DESKTOP_APP, the NSIS
@@ -22,6 +24,8 @@ const os =
 
 const app = process.env.OPENCODE_DESKTOP_APP
 
+const openjam = process.env.OPENCODE_DESKTOP_FLAVOR === "openjam"
+
 const flags = [`--${os}`, `--${cli.cpu}`, "--publish", "never", "--config", "electron-builder.config.ts"]
 
 process.chdir(dir)
@@ -36,7 +40,15 @@ if (app) {
   // The installer uses the channel's icons; the rest of the app is already built and signed.
   await $`bun ./script/copy-icons.ts ${resolveChannel()}`
   await $`bunx electron-builder ${flags} --prepackaged ${app}`
-  await cp(`dist/opencode-desktop-win-${cli.cpu}.exe`, path.join(out, `opencode-desktop-win-${cli.cpu}.exe`))
+  const installer = `${openjam ? OPENJAM_PACKAGE : "opencode-desktop"}-win-${cli.cpu}.exe`
+
+  await cp(`dist/${installer}`, path.join(out, installer))
+
+  if (openjam) {
+    // These describe the candidate bytes. Recompute them if signing changes the installer.
+    await cp("dist/latest.yml", path.join(out, "latest.yml"))
+    await cp(`dist/${installer}.blockmap`, path.join(out, `${installer}.blockmap`))
+  }
 }
 
 if (!app && os === "linux") {
@@ -66,7 +78,10 @@ if (!app && os === "win") {
 // electron-updater reads its feed from that file, so write the one those targets would.
 async function writeUpdateConfig(resources: string) {
   const publish = getConfig().publish
-  const name: string = (await Bun.file("package.json").json()).name
+  const name: string = openjam ? OPENJAM_PACKAGE : (await Bun.file("package.json").json()).name
+
+  const publisher = openjam ? [`publisherName: ${JSON.stringify([openJamSigning().publisher])}`] : []
+
   await Bun.write(
     path.join(resources, "app-update.yml"),
     [
@@ -74,6 +89,7 @@ async function writeUpdateConfig(resources: string) {
       `url: ${publish.url}`,
       `channel: ${publish.channel}`,
       `updaterCacheDirName: '${name.replace(/[/\\:*?"<>|]/g, "").toLowerCase()}-updater'`,
+      ...publisher,
     ].join("\n") + "\n",
   )
 }

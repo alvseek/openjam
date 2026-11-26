@@ -1,4 +1,7 @@
 import { app } from "electron"
+import { OPENJAM_ID, OPENJAM_NAME } from "../shared/openjam"
+
+export const OPENJAM = import.meta.env.OPENCODE_DESKTOP_FLAVOR === "openjam"
 
 type Channel = "local" | "dev" | "beta" | "prod"
 
@@ -8,19 +11,21 @@ export const CHANNEL: Channel = raw === "local" || raw === "dev" || raw === "bet
 
 export const VERSION = app.isPackaged ? app.getVersion() : (process.env.OPENCODE_VERSION ?? app.getVersion())
 
-const appNames: Record<string, string> = {
+const appNames = {
   dev: "OpenCode Dev",
   beta: "OpenCode Beta",
   prod: "OpenCode",
 }
 
-const appIDs: Record<string, string> = {
+const appIDs = {
   dev: "ai.opencode.desktop.dev",
   beta: "ai.opencode.desktop.beta",
   prod: "ai.opencode.desktop",
 }
 
 // Local renderer/server mode keeps the dev application identity.
-export const APP_NAME = app.isPackaged ? appNames[CHANNEL] : "OpenCode Dev"
+const identity = app.isPackaged && CHANNEL !== "local" ? CHANNEL : "dev"
 
-export const APP_ID = app.isPackaged ? appIDs[CHANNEL] : "ai.opencode.desktop.dev"
+export const APP_NAME = OPENJAM ? OPENJAM_NAME : appNames[identity]
+
+export const APP_ID = OPENJAM ? OPENJAM_ID : appIDs[identity]

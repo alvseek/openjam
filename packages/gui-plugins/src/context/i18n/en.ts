@@ -6,7 +6,7 @@ export default {
   "usage.cost": "Cost",
   "usage.idle": "Idle",
   "usage.now": "now",
-  "usage.cacheExpired": "Prompt cache expired",
+  "usage.cacheExpired": "Time since last request exceeds the configured cache lifetime",
   "usage.view": "View context usage",
   "usage.toggle": "Toggle session context",
   "systemPrompt.title": "System Prompt",

@@ -1523,6 +1523,7 @@ function currentProviders(catalog: MockProviderCatalog) {
       integrationID: provider.integrationID,
       package: provider.id,
       activation: connected.has(provider.id) ? "enabled" : "auto",
+      settings: provider.settings,
     }))
 }
 
@@ -1545,6 +1546,7 @@ function currentModels(catalog: MockProviderCatalog) {
           cost: [{ input: model.cost?.input ?? 0, output: model.cost?.output ?? 0, cache: { read: 0, write: 0 } }],
           status: "active",
           enabled: true,
+          settings: model.settings,
           limit: { context: model.limit?.context ?? 200_000, output: model.limit?.output ?? 32_000 },
         })),
     )
@@ -1660,6 +1662,7 @@ const decodeProvider = Schema.decodeUnknownOption(
     name: Schema.String,
     canonical: lenient(Schema.String),
     integrationID: lenient(Schema.String),
+    settings: lenient(Schema.Unknown),
   }),
 )
 
@@ -1676,6 +1679,7 @@ const decodeModel = Schema.decodeUnknownOption(
     cost: lenient(Schema.Struct({ input: lenient(Schema.Number), output: lenient(Schema.Number) })),
     capabilities: lenient(Model.Capabilities),
     variants: lenient(Schema.Record(Schema.String, Schema.Unknown)),
+    settings: lenient(Schema.Unknown),
     time: lenient(Schema.Struct({ released: Schema.Number })),
   }),
 )

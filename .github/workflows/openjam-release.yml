@@ -1,0 +1,263 @@
+name: OpenJam Windows release
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 7 * * *"
+
+# One producer for the fork's latest feed, including the ledger read and the final promotion.
+concurrency:
+  group: openjam-windows-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  resolve:
+    if: github.repository == 'alvseek/openjam'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      status: ${{ steps.source.outputs.status }}
+      version: ${{ steps.source.outputs.version }}
+      source: ${{ steps.source.outputs.source }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - name: Install resolver dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Check resolver and staging contracts
+        working-directory: packages/desktop
+        run: bun test script/openjam-source.test.ts script/openjam-release.test.ts
+      - name: Resolve stable upstream source against the published ledger
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bun .github/openjam/cli.ts ledger ledger.json
+          if ! bun packages/desktop/script/openjam-source.ts --releases ledger.json > resolution.json; then
+            cat resolution.json
+            echo "::error::Stable upstream source resolution failed; see version and reason above"
+            exit 1
+          fi
+          bun .github/openjam/cli.ts report resolution.json "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.status == 'resolved'
+    name: Build Windows x64 (${{ needs.resolve.outputs.version }})
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      OPENJAM_VERSION: ${{ needs.resolve.outputs.version }}
+      OPENJAM_SOURCE: ${{ needs.resolve.outputs.source }}
+      OPENJAM_FEED_URL: https://github.com/alvseek/openjam/releases/latest/download/
+      OPENJAM_PUBLISHER_NAME: ${{ vars.OPENJAM_PUBLISHER_NAME }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - name: Check out verified stable commit
+        run: |
+          git init upstream
+          git -C upstream config core.symlinks true
+          git -C upstream config core.autocrlf false
+          git -C upstream fetch --no-tags --depth=1 https://github.com/anomalyco/opencode.git "$OPENJAM_SOURCE"
+          git -C upstream checkout --detach FETCH_HEAD
+          test "$(git -C upstream rev-parse HEAD)" = "$OPENJAM_SOURCE"
+      - name: Replay timer patch (fail closed on conflict)
+        run: |
+          patch=../.github/openjam/timer.patch
+          if ! git -C upstream apply --index --check "$patch"; then
+            echo "::error::Timer patch conflicts with upstream $OPENJAM_VERSION ($OPENJAM_SOURCE)"
+            exit 1
+          fi
+          git -C upstream apply --index "$patch"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+      - name: Apply the reviewed packaging overlay and build without publishing
+        working-directory: upstream
+        run: |
+          # The adapter runs from the pinned upstream checkout, preflights the overlay's
+          # Git blob IDs, installs its lockfile, and emits only the Windows x64 updater bundle.
+          adapter=../packages/desktop/script/openjam-build.ts
+          if [[ ! -f "$adapter" ]]; then
+            echo "::error::Cannot package upstream $OPENJAM_VERSION ($OPENJAM_SOURCE): Step 3 adapter is missing"
+            exit 1
+          fi
+          mkdir ../openjam-package
+          export OPENJAM_OUTPUT_DIR="$(cygpath -am ../openjam-package)"
+          bun "$adapter"
+      - name: Check timer calculations
+        working-directory: upstream/packages/util
+        run: bun test src/duration.test.ts
+      - name: Check timer in the TUI
+        working-directory: upstream/packages/tui
+        run: bun test test/feature-plugins/prompt-footer.test.tsx test/feature-plugins/sidebar-context.test.tsx
+      - name: Check timer in the built desktop renderer
+        working-directory: upstream/packages/app
+        run: |
+          bunx playwright install chromium
+          bun run test:e2e:built e2e/regression/session-header.spec.ts -g 'prompt cache age' --workers=1 --retries=0
+      - name: Collect the base build's updater configuration as data
+        run: cp upstream/dist/desktop/app/resources/app-update.yml openjam-package/app-update.yml
+      - name: Transfer package outputs as data
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openjam-package
+          path: openjam-package/
+          if-no-files-found: error
+          retention-days: 3
+
+  sign:
+    needs: build
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      vars.OPENJAM_SIGNING_ENABLED == 'true'
+    name: Sign the OpenJam installer
+    runs-on: windows-2025
+    timeout-minutes: 15
+    environment: openjam-signing
+    env:
+      OPENJAM_PUBLISHER_NAME: ${{ vars.OPENJAM_PUBLISHER_NAME }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            /.github/openjam/
+            /package.json
+          sparse-checkout-cone-mode: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: openjam-package
+          path: ${{ runner.temp }}/openjam-unsigned
+      - name: Confirm the base build pins this publisher
+        shell: pwsh
+        run: bun .github/openjam/cli.ts check-publisher "$env:RUNNER_TEMP/openjam-unsigned/app-update.yml"
+      - name: Sign only the installer with the protected PFX
+        shell: powershell
+        env:
+          OPENJAM_PFX_BASE64: ${{ secrets.OPENJAM_PFX_BASE64 }}
+          OPENJAM_PFX_PASSWORD: ${{ secrets.OPENJAM_PFX_PASSWORD }}
+        run: ./.github/openjam/sign.ps1 "$env:RUNNER_TEMP/openjam-unsigned/openjam-desktop-win-x64.exe"
+      - name: Check the final installer signature
+        shell: powershell
+        run: ./.github/openjam/verify-signature.ps1 "$env:RUNNER_TEMP/openjam-unsigned/openjam-desktop-win-x64.exe"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openjam-signed-installer
+          path: ${{ runner.temp }}/openjam-unsigned/openjam-desktop-win-x64.exe
+          if-no-files-found: error
+          retention-days: 3
+
+  stage:
+    needs: [resolve, build, sign]
+    # When signing is disabled, still make an unsigned candidate available. Never fall back after a signing failure.
+    if: >-
+      !cancelled() && needs.build.result == 'success' &&
+      (needs.sign.result == 'success' || needs.sign.result == 'skipped')
+    name: Stage Windows x64 (${{ needs.resolve.outputs.version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.sign.result == 'success' && 'openjam-signed-installer' || 'openjam-package' }}
+          path: openjam-package
+      - name: Install the locked metadata generator without lifecycle scripts
+        if: needs.sign.result == 'success'
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Regenerate metadata and blockmap from the signed bytes
+        if: needs.sign.result == 'success'
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SOURCE: ${{ needs.resolve.outputs.source }}
+        run: bun .github/openjam/cli.ts metadata "$VERSION" "$SOURCE" openjam-package
+      - name: Read published ledger
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun .github/openjam/cli.ts ledger ledger.json
+      - name: Validate and stage installer, blockmap, manifest, and ledger
+        id: bundle
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SOURCE: ${{ needs.resolve.outputs.source }}
+        run: |
+          result=$(bun .github/openjam/cli.ts stage "$VERSION" "$SOURCE" ledger.json openjam-package openjam-stage)
+          echo "OpenJam $VERSION: $result"
+          echo "status=$result" >> "$GITHUB_OUTPUT"
+      # Actions artifacts on this public fork are not private. Use loopback for private A-to-B testing.
+      - name: Upload validated candidate without publishing a release
+        if: steps.bundle.outputs.status == 'staged'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ needs.sign.result == 'success' && 'openjam-signed-stage' || 'openjam-unsigned-stage' }}
+          path: openjam-stage/
+          if-no-files-found: error
+          retention-days: 14
+    outputs:
+      status: ${{ steps.bundle.outputs.status }}
+
+  promote:
+    needs: [resolve, sign, stage]
+    # Leave the repository variable unset until installed A-to-B blue-button acceptance.
+    # The command below also has a literal off switch that requires a reviewed workflow edit.
+    if: >-
+      github.repository == 'alvseek/openjam' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.sign.result == 'success' &&
+      needs.stage.outputs.status == 'staged' &&
+      vars.OPENJAM_PUBLICATION_APPROVED == 'true'
+    name: Promote Windows x64 (${{ needs.resolve.outputs.version }})
+    runs-on: windows-2025
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            /.github/openjam/
+            /package.json
+          sparse-checkout-cone-mode: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: openjam-signed-stage
+          path: openjam-stage
+      - name: Independently verify the installer signature, then publish the verified draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SOURCE: ${{ needs.resolve.outputs.source }}
+          OPENJAM_PUBLISHER_NAME: ${{ vars.OPENJAM_PUBLISHER_NAME }}
+          OPENJAM_PUBLICATION_APPROVED: "false"
+        run: bun .github/openjam/cli.ts promote "$VERSION" "$SOURCE" openjam-stage

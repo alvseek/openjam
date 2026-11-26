@@ -6,6 +6,8 @@ import { Arch, type Configuration } from "electron-builder"
 import { NativeArch } from "../../script/native-arch"
 import { DESKTOP_NATIVE_ENGLISH } from "@opencode/app/i18n/desktop-native"
 import { CLI_BINARIES, getCurrentCli, nodePtyPackage } from "./script/utils"
+import { openJamSigning } from "./script/openjam-signing"
+import { OPENJAM_FEED, OPENJAM_ID, OPENJAM_NAME, OPENJAM_PACKAGE } from "./src/shared/openjam"
 
 const packageDir = path.dirname(fileURLToPath(import.meta.url))
 
@@ -209,6 +211,29 @@ const getBase = (appId: string): Configuration => {
 }
 
 export function getConfig() {
+  if (process.env.OPENCODE_DESKTOP_FLAVOR === "openjam") {
+    if (getCurrentCli().target !== "windows-x64") throw new Error("OpenJam only packages Windows x64")
+
+    const base = getBase(OPENJAM_ID)
+    const signing = openJamSigning()
+
+    return {
+      ...base,
+      appId: OPENJAM_ID,
+      productName: OPENJAM_NAME,
+      artifactName: "openjam-desktop-${os}-${arch}.${ext}",
+      extraMetadata: { ...base.extraMetadata, name: OPENJAM_PACKAGE, productName: OPENJAM_NAME },
+      protocols: [],
+      win: {
+        ...base.win,
+        verifyUpdateCodeSignature: true,
+        forceCodeSigning: signing.required,
+        signtoolOptions: { publisherName: [signing.publisher], certificateSha1: signing.certificateSha1 },
+      },
+      publish: { provider: "generic", url: openJamFeed(), channel: "latest" },
+    }
+  }
+
   const channel = resolveChannel()
   const appId = APP_IDS[channel]
   const base = getBase(appId)
@@ -275,3 +300,23 @@ export function getConfig() {
 }
 
 export default getConfig()
+
+function openJamFeed() {
+  const url = new URL(process.env.OPENJAM_FEED_URL ?? OPENJAM_FEED)
+
+  if (url.href === OPENJAM_FEED) return url.href
+
+  // Local updater acceptance can use its own loopback feed, but not the stock feed.
+  if (
+    url.protocol === "http:" &&
+    (url.hostname === "127.0.0.1" || url.hostname === "[::1]") &&
+    !url.username &&
+    !url.password &&
+    !url.search &&
+    !url.hash &&
+    url.pathname.endsWith("/")
+  )
+    return url.href
+
+  throw new Error("OpenJam updates require the OpenJam release feed or an HTTP loopback test feed")
+}

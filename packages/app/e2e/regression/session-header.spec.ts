@@ -1,9 +1,15 @@
-import type { SessionMessageInfo } from "@opencode/client/promise"
+﻿import type { SessionMessageInfo } from "@opencode/client/promise"
 import { expect, test, type Page } from "@playwright/test"
-import { REMOTE_SERVER, seed, sessionHref } from "../utils/app"
+import { provider, REMOTE_SERVER, seed, sessionHref } from "../utils/app"
 import { fixture, mockStressTimeline } from "../utils/session-fixture"
 import { reviewTabs } from "../utils/side-panel"
-import { chooseUserMessageAction, openUserMessageMenu } from "../utils/timeline"
+import {
+  assistantMessage,
+  chooseUserMessageAction,
+  openUserMessageMenu,
+  textPart,
+  userMessage,
+} from "../utils/timeline"
 import { expectSessionTitle } from "../utils/waits"
 import { mockRemoteServer, mockWorkspace, openSession } from "../utils/workspace"
 
@@ -886,5 +892,74 @@ test.describe("revert", () => {
     await expectSessionTitle(page, "Session message revert")
     const menu = await openUserMessageMenu(page, page.locator('[data-message-id="msg_second"]'))
     await expect(menu.getByRole("menuitem", { name: /^(Revert to here|Undo)$/ })).toHaveCount(0)
+  })
+})
+
+// The session context chip carries the prompt cache's age: from the assistant message whose request wrote
+// the cache, warned only after the lifetime the model declares.
+test.describe("prompt cache age", () => {
+  const at = Date.UTC(2026, 10, 21, 12, 0, 0)
+
+  const openCacheSession = async (page: Page, input: { ttl?: string; age: number }) => {
+    await page.setViewportSize({ width: 1200, height: 900 })
+    await page.clock.install({ time: at })
+    await page.clock.pauseAt(at + 1_000)
+
+    const model = input.ttl
+      ? { id: "claude-opus-4-6", name: "Opus", settings: { cache: { ttl: input.ttl } } }
+      : { id: "claude-opus-4-6", name: "Opus" }
+
+    return openSession(page, {
+      name: "CacheAge",
+      provider: provider(model),
+      pageMessages: () => ({
+        items: [
+          userMessage([], { id: "msg_cache_user", created: at - input.age - 1_000 }),
+          assistantMessage([textPart("prt_cache_reply", "Reply")], {
+            id: "msg_cache_reply",
+            created: at - input.age,
+          }),
+        ],
+      }),
+    })
+  }
+
+  test("counts up and warns only after the declared cache lifetime", async ({ page }) => {
+    // The clock is paused 1 s after the message, so the first age is 3m 31s and the coarse text is 3m.
+    await openCacheSession(page, { ttl: "5m", age: 210_000 })
+    const header = page.locator("[data-session-title]")
+    const usage = header.getByRole("button", { name: "Toggle session context", exact: true })
+
+    await expect(usage.getByText("3m", { exact: true })).toBeVisible()
+
+    // Two minute ticks: 4m 31s is inside the 5m lifetime, 5m 31s is past it.
+    await page.clock.runFor(60_000)
+    const inside = usage.getByText("4m", { exact: true })
+    await expect(inside).toBeVisible()
+    await expect(inside).not.toHaveClass(/text-v2-state-fg-warning/)
+
+    await page.clock.runFor(60_000)
+    const expired = usage.getByText("5m", { exact: true })
+    await expect(expired).toHaveClass(/text-v2-state-fg-warning/)
+    await usage.hover()
+    await page.clock.fastForward(700)
+    await expect(page.getByRole("tooltip")).toHaveText(
+      "Toggle session context — Time since last request exceeds the configured cache lifetime",
+    )
+
+  })
+
+  test("shows the age alone when the model declares no cache lifetime", async ({ page }) => {
+    await openCacheSession(page, { age: 360_000 })
+    const header = page.locator("[data-session-title]")
+    const usage = header.getByRole("button", { name: "Toggle session context", exact: true })
+    const age = usage.getByText("6m", { exact: true })
+
+    await expect(age).toBeVisible()
+    await expect(age).not.toHaveClass(/text-v2-state-fg-warning/)
+    await usage.hover()
+    await page.clock.fastForward(700)
+    await expect(page.getByRole("tooltip")).toHaveText("Toggle session context")
+
   })
 })

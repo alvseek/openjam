@@ -34,6 +34,38 @@ downloads the published dev CLI, `beta` downloads the beta CLI, and `prod`/`late
 `bun dev` is separate from packaging: it uses local renderer/server mode, the dev app identity, and the CLI source by
 default. `bun dev --download-server <version>` instead downloads that CLI version for local development.
 
+### OpenJam Windows x64 candidates
+
+On Windows x64, use a disposable checkout of the verified upstream release commit. Replay the timer change and the
+OpenJam packaging changes there, then run `bun install --frozen-lockfile` from the checkout root and
+`bun run --cwd packages/desktop script/openjam-build.ts [major.minor.patch]`. The optional version stamps the desktop
+app and defaults to the tagged desktop package version. The sidecar is the published Windows x64 baseline CLI at the
+tagged package version, independent of the candidate's version.
+
+Automation can run the adapter from the timer-patched upstream checkout root as
+`bun <control-checkout>/packages/desktop/script/openjam-build.ts`. Resolve and check out the immutable upstream
+release commit before running the adapter. The reviewed `openjam-2.4.2.patch` can apply to any such release with
+a clean desktop tree and the exact file inputs recorded in the patch. A release number change alone does not
+require a new patch. Changed inputs, local collisions, and patches that do not apply are rejected before building.
+The original 2.3.2 recipe still uses its original blob guards.
+`OPENJAM_VERSION` sets the candidate version and `OPENJAM_OUTPUT_DIR`
+copies the installer, manifest and blockmap to a separate staging directory.
+
+Outputs under `dist/desktop/` are `openjam-desktop-win-x64.exe`, `latest.yml`, its installer's `.blockmap`, and `app/`
+(the unpacked application used to build the installer). This command builds locally; it never publishes. The feed is
+`https://github.com/alvseek/openjam/releases/latest/download/`, and the cache is `openjam-desktop-updater`. Keep these
+candidate artifacts local. Builds with no approved identity produce unsigned installers; these cannot pass Windows
+publisher verification as updates. To sign, provide either `OPENJAM_SIGNING_CERT_SHA1` for an accessible certificate
+in the Windows signing store, or electron-builder's `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD` for an external PFX.
+Set `OPENJAM_PUBLISHER_NAME` to the certificate's publisher name on both the base and update builds. Signed mode
+requires electron-builder signing and checks the final installer's Authenticode status and publisher before copying
+outputs. Electron-builder produces the manifest and blockmap from the final signed bytes.
+`OPENJAM_FEED_URL` can override the feed for loopback HTTP acceptance tests; stock and other remote feeds are rejected.
+
+OpenJam uses its own installer and Electron identity and does not register the stock `opencode://` protocol.
+It only discovers a healthy, authenticated stock service at the bundled CLI version. If none matches, it refuses to
+connect; it never starts, restarts, or replaces that service.
+
 ## Beta channel
 
 Every push to the `beta` branch publishes OpenCode Beta (`ai.opencode.desktop.beta`) as version `0.0.0-beta-<run>` to

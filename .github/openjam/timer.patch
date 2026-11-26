@@ -1,0 +1,608 @@
+diff --git a/packages/app/e2e/regression/session-header.spec.ts b/packages/app/e2e/regression/session-header.spec.ts
+index adc8c9252de0095d3e6eb879bc7b78ad555faa22..c6d75f4a9c78379308d8d71671e1688c90e865fd 100644
+--- a/packages/app/e2e/regression/session-header.spec.ts
++++ b/packages/app/e2e/regression/session-header.spec.ts
+@@ -1,6 +1,6 @@
+-import type { SessionMessageInfo } from "@opencode/client/promise"
++﻿import type { SessionMessageInfo } from "@opencode/client/promise"
+ import { expect, test, type Page } from "@playwright/test"
+-import { REMOTE_SERVER, seed, sessionHref } from "../utils/app"
++import { provider, REMOTE_SERVER, seed, sessionHref } from "../utils/app"
+ import { fixture, mockStressTimeline } from "../utils/session-fixture"
+ import { reviewTabs } from "../utils/side-panel"
+ import {
+@@ -1018,3 +1018,72 @@ test.describe("revert", () => {
+     await expect(menu.getByRole("menuitem", { name: /^(Revert to here|Undo)$/ })).toHaveCount(0)
+   })
+ })
++
++// The session context chip carries the prompt cache's age: from the assistant message whose request wrote
++// the cache, warned only after the lifetime the model declares.
++test.describe("prompt cache age", () => {
++  const at = Date.UTC(2026, 10, 21, 12, 0, 0)
++
++  const openCacheSession = async (page: Page, input: { ttl?: string; age: number }) => {
++    await page.setViewportSize({ width: 1200, height: 900 })
++    await page.clock.install({ time: at })
++    await page.clock.pauseAt(at + 1_000)
++
++    const model = input.ttl
++      ? { id: "claude-opus-4-6", name: "Opus", settings: { cache: { ttl: input.ttl } } }
++      : { id: "claude-opus-4-6", name: "Opus" }
++
++    return openSession(page, {
++      name: "CacheAge",
++      provider: provider(model),
++      pageMessages: () => ({
++        items: [
++          userMessage([], { id: "msg_cache_user", created: at - input.age - 1_000 }),
++          assistantMessage([textPart("prt_cache_reply", "Reply")], {
++            id: "msg_cache_reply",
++            created: at - input.age,
++          }),
++        ],
++      }),
++    })
++  }
++
++  test("counts up and warns only after the declared cache lifetime", async ({ page }) => {
++    // The clock is paused 1 s after the message, so the first age is 3m 31s and the coarse text is 3m.
++    await openCacheSession(page, { ttl: "5m", age: 210_000 })
++    const header = page.locator("[data-session-title]")
++    const usage = header.getByRole("button", { name: "Toggle session context", exact: true })
++
++    await expect(usage.getByText("3m", { exact: true })).toBeVisible()
++
++    // Two minute ticks: 4m 31s is inside the 5m lifetime, 5m 31s is past it.
++    await page.clock.runFor(60_000)
++    const inside = usage.getByText("4m", { exact: true })
++    await expect(inside).toBeVisible()
++    await expect(inside).not.toHaveClass(/text-v2-state-fg-warning/)
++
++    await page.clock.runFor(60_000)
++    const expired = usage.getByText("5m", { exact: true })
++    await expect(expired).toHaveClass(/text-v2-state-fg-warning/)
++    await usage.hover()
++    await page.clock.fastForward(700)
++    await expect(page.getByRole("tooltip")).toHaveText(
++      "Toggle session context — Time since last request exceeds the configured cache lifetime",
++    )
++
++  })
++
++  test("shows the age alone when the model declares no cache lifetime", async ({ page }) => {
++    await openCacheSession(page, { age: 360_000 })
++    const header = page.locator("[data-session-title]")
++    const usage = header.getByRole("button", { name: "Toggle session context", exact: true })
++    const age = usage.getByText("6m", { exact: true })
++
++    await expect(age).toBeVisible()
++    await expect(age).not.toHaveClass(/text-v2-state-fg-warning/)
++    await usage.hover()
++    await page.clock.fastForward(700)
++    await expect(page.getByRole("tooltip")).toHaveText("Toggle session context")
++
++  })
++})
+diff --git a/packages/app/e2e/utils/mock-server.ts b/packages/app/e2e/utils/mock-server.ts
+index 32e30a883e75b0394576902ebe029876d6d43ee8..54cbbffe9ddaa759be205bf14adabfba2d4dc059 100644
+--- a/packages/app/e2e/utils/mock-server.ts
++++ b/packages/app/e2e/utils/mock-server.ts
+@@ -1548,6 +1548,7 @@ function currentProviders(catalog: MockProviderCatalog) {
+       integrationID: provider.integrationID,
+       package: provider.id,
+       activation: connected.has(provider.id) ? "enabled" : "auto",
++      settings: provider.settings,
+     }))
+ }
+ 
+@@ -1570,6 +1571,7 @@ function currentModels(catalog: MockProviderCatalog) {
+           cost: [{ input: model.cost?.input ?? 0, output: model.cost?.output ?? 0, cache: { read: 0, write: 0 } }],
+           status: "active",
+           enabled: true,
++          settings: model.settings,
+           limit: { context: model.limit?.context ?? 200_000, output: model.limit?.output ?? 32_000 },
+         })),
+     )
+@@ -1685,6 +1687,7 @@ const decodeProvider = Schema.decodeUnknownOption(
+     name: Schema.String,
+     canonical: lenient(Schema.String),
+     integrationID: lenient(Schema.String),
++    settings: lenient(Schema.Unknown),
+   }),
+ )
+ 
+@@ -1701,6 +1704,7 @@ const decodeModel = Schema.decodeUnknownOption(
+     cost: lenient(Schema.Struct({ input: lenient(Schema.Number), output: lenient(Schema.Number) })),
+     capabilities: lenient(Model.Capabilities),
+     variants: lenient(Schema.Record(Schema.String, Schema.Unknown)),
++    settings: lenient(Schema.Unknown),
+     time: lenient(Schema.Struct({ released: Schema.Number })),
+   }),
+ )
+diff --git a/packages/gui-plugins/src/context/i18n/en.ts b/packages/gui-plugins/src/context/i18n/en.ts
+index 24cfd5c657068782b0a7a941794a96a628a292b5..a65becb70d7dcb2a5d70fad68b11f6fda3f346ac 100644
+--- a/packages/gui-plugins/src/context/i18n/en.ts
++++ b/packages/gui-plugins/src/context/i18n/en.ts
+@@ -4,6 +4,9 @@ export default {
+   "usage.tokens": "Tokens",
+   "usage.usage": "Context",
+   "usage.cost": "Cost",
++  "usage.idle": "Idle",
++  "usage.now": "now",
++  "usage.cacheExpired": "Time since last request exceeds the configured cache lifetime",
+   "usage.view": "View context usage",
+   "usage.toggle": "Toggle session context",
+   "rawMessages.title": "Raw messages",
+diff --git a/packages/gui-plugins/src/context/indicator.tsx b/packages/gui-plugins/src/context/indicator.tsx
+index ff3b1bb71cbb35c529d7a96d6fed531c983a6bd9..d83011e469c69e39e44e19038e2cc2389653ecb5 100644
+--- a/packages/gui-plugins/src/context/indicator.tsx
++++ b/packages/gui-plugins/src/context/indicator.tsx
+@@ -1,4 +1,4 @@
+-import { Show, createMemo, type ComponentProps, type JSX } from "solid-js"
++import { Show, createMemo, createSignal, onCleanup, type ComponentProps, type JSX } from "solid-js"
+ import { ProgressCircle } from "@opencode/ui/progress-circle"
+ import { Button } from "@opencode/ui/button"
+ import { Menu } from "@opencode/ui/menu"
+@@ -6,6 +6,7 @@ import { Tooltip } from "@opencode/ui/tooltip"
+ import { useI18n } from "@opencode/ui/context/i18n"
+ import { lastAssistantWithUsage } from "@opencode/client/solid"
+ import { usePlugin, type MountedSession } from "@opencode/plugin/gui"
++import { durationCoarse, idleState } from "@opencode/util/duration"
+ import { catalogModel, syncCatalog } from "./catalog"
+ 
+ export function SessionContextUsage(props: {
+@@ -32,6 +33,11 @@ export function SessionContextUsage(props: {
+     props.session.id ? props.session.server.data.session.message.list(props.session.id) : [],
+   )
+ 
++  // The age only moves by the minute, so this ticks like the app's recent-sessions list rather than per second.
++  const [now, setNow] = createSignal(Date.now())
++  const clock = setInterval(() => setNow(Date.now()), 60_000)
++  onCleanup(() => clearInterval(clock))
++
+   const usd = createMemo(
+     () =>
+       new Intl.NumberFormat(i18n.locale(), {
+@@ -49,7 +55,8 @@ export function SessionContextUsage(props: {
+     const message = lastAssistantWithUsage(messages(), info()?.revert?.messageID)
+ 
+     if (!message) return
+-    const model = catalogModel(props.session, message.model)?.model
++    const entry = catalogModel(props.session, message.model)
++    const model = entry?.model
+ 
+     const total =
+       message.tokens.input +
+@@ -61,9 +68,22 @@ export function SessionContextUsage(props: {
+     return {
+       total,
+       usage: model?.limit.context ? Math.round((total / model.limit.context) * 100) : null,
++      // The provider writes the cache when it reads the request, so the lifetime starts at the message.
++      created: message.time.created,
++      ttl: model?.settings?.cache?.ttl ?? entry?.provider.settings?.cache?.ttl,
+     }
+   })
+ 
++  const idle = createMemo(() => idleState({ created: context()?.created, ttl: context()?.ttl, now: now() }))
++
++  const idleText = createMemo(() => {
++    const state = idle()
++
++    if (!state) return
++
++    return durationCoarse(state.age) ?? ctx.t("usage.now")
++  })
++
+   const tokens = createMemo(() =>
+     new Intl.NumberFormat(i18n.locale(), { notation: "compact", maximumFractionDigits: 0 })
+       .format(context()?.total ?? 0)
+@@ -75,6 +95,11 @@ export function SessionContextUsage(props: {
+ 
+   const cost = createMemo(() => usd().format(spent()))
+ 
++  // The number's colour carries the state; the tooltip is where it is said in words, for anyone who cannot see it.
++  const tooltip = createMemo(() =>
++    idle()?.expired ? `${ctx.t("usage.toggle")} — ${ctx.t("usage.cacheExpired")}` : ctx.t("usage.toggle"),
++  )
++
+   const showCost = createMemo(() => {
+     if (spent() > 0) return true
+     const ref = info()?.model ?? messages().findLast((item) => item.type === "assistant")?.model
+@@ -153,6 +178,7 @@ export function SessionContextUsage(props: {
+         <Menu.Content class="w-[200px] max-w-[calc(100vw-16px)]" aria-label={ctx.t("usage.view")}>
+           {menuRow(ctx.t("usage.tokens"), context()?.total.toLocaleString(i18n.locale()) ?? "0")}
+           <Show when={showCost()}>{menuRow(ctx.t("usage.cost"), cost())}</Show>
++          <Show when={idleText()}>{(text) => menuRow(ctx.t("usage.idle"), text())}</Show>
+           {menuRow(ctx.t("usage.usage"), `${context()?.usage ?? 0}%`)}
+           <Menu.Separator />
+           <Menu.Item onSelect={viewContext}>{ctx.t("usage.view")}</Menu.Item>
+@@ -167,7 +193,7 @@ export function SessionContextUsage(props: {
+         <Show
+           when={variant() === "indicator"}
+           fallback={
+-            <Tooltip value={ctx.t("usage.toggle")} placement={props.placement ?? "top"}>
++            <Tooltip value={tooltip()} placement={props.placement ?? "top"}>
+               <Button
+                 type="button"
+                 variant="ghost-muted"
+@@ -180,6 +206,12 @@ export function SessionContextUsage(props: {
+                 <span class="flex items-center gap-2 whitespace-nowrap group-active:text-v2-text-text-muted">
+                   {compactCircle()}
+                   <span>{tokens()}</span>
++                  <Show when={idleText()}>
++                    <span aria-hidden="true" class="flex w-1.5 shrink-0 items-center justify-center">
++                      ·
++                    </span>
++                    <span classList={{ "text-v2-state-fg-warning": idle()?.expired === true }}>{idleText()}</span>
++                  </Show>
+                   <Show when={showCost()}>
+                     <span aria-hidden="true" class="flex w-1.5 shrink-0 items-center justify-center">
+                       ·
+diff --git a/packages/tui/src/feature-plugins/prompt/footer.tsx b/packages/tui/src/feature-plugins/prompt/footer.tsx
+index e8ae34d751d06d5755ef6c3b66b7c749e7a0fd91..7f97bf7bdca01dd9ed8b39b8751ce5ad4200c9db 100644
+--- a/packages/tui/src/feature-plugins/prompt/footer.tsx
++++ b/packages/tui/src/feature-plugins/prompt/footer.tsx
+@@ -1,6 +1,7 @@
+ import { Plugin } from "@opencode/plugin/tui"
+-import { createMemo, createSignal, Match, Show, Switch } from "solid-js"
++import { createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
+ import { contextUsage, formatContextUsage } from "../../util/session"
++import { durationCoarse, idleState } from "@opencode/util/duration"
+ import { useTerminalDimensions } from "@opentui/solid"
+ import { TextAttributes } from "@opentui/core"
+ import { useInteractivity } from "../../context/interactivity"
+@@ -21,6 +22,11 @@ export function PromptFooter(props: {
+ }) {
+   const dimensions = useTerminalDimensions()
+   const [liveHovered, setLiveHovered] = createSignal(false)
++
++  const [now, setNow] = createSignal(Date.now())
++  const clock = setInterval(() => setNow(Date.now()), 60_000)
++  onCleanup(() => clearInterval(clock))
++
+   const counts = createMemo(() =>
+     props.sessionID
+       ? busyCounts({ data: props.context.data, sessionID: props.sessionID, location: props.context.location })
+@@ -37,12 +43,15 @@ export function PromptFooter(props: {
+       props.context.data.session.message.list(props.sessionID),
+       props.context.data.location.model.list(session.location),
+       session.revert?.messageID,
++      props.context.data.location.provider.list(session.location),
+     )
+     const cost = props.context.data.session.cost(props.sessionID)
++    const idle = usage && idleState({ created: usage.created, ttl: usage.ttl, now: now() })
+     return [
+-      usage ? formatContextUsage(usage.tokens, usage.percent) : undefined,
+-      cost > 0 ? money.format(cost) : undefined,
+-    ].filter((item): item is string => Boolean(item))
++      usage && { text: formatContextUsage(usage.tokens, usage.percent), warning: false },
++      idle && { text: durationCoarse(idle.age) ?? "now", warning: idle.expired },
++      cost > 0 ? { text: money.format(cost), warning: false } : undefined,
++    ].filter((item) => item !== undefined)
+   })
+   const live = createMemo(() => [scripts(), subagents(), shells()].filter((item): item is string => Boolean(item)))
+   const goal = createGoal(props.context, () => props.sessionID)
+@@ -54,7 +63,7 @@ export function PromptFooter(props: {
+     if (status().length === 0) return { usage: false, shortcuts: dimensions().width >= 44 }
+     return promptFooterLayout({
+       width: Math.max(0, dimensions().width - 8),
+-      usage: status(),
++      usage: status().map((item) => item.text),
+       shortcuts: command ? [`${command} commands`] : [],
+     })
+   })
+@@ -94,7 +103,16 @@ export function PromptFooter(props: {
+               <Show when={props.showDetails && layout().usage && status().length > 0}>
+                 <text fg={props.context.theme.text.muted} wrapMode="none" flexShrink={0}>
+                   <Show when={live().length > 0 || goal()}> · </Show>
+-                  {status().join(" · ")}
++                  <For each={status()}>
++                    {(item, index) => (
++                      <>
++                        <Show when={index() > 0}> · </Show>
++                        <span style={item.warning ? { fg: props.context.theme.text.feedback.warning.base } : {}}>
++                          {item.text}
++                        </span>
++                      </>
++                    )}
++                  </For>
+                 </text>
+               </Show>
+             </box>
+diff --git a/packages/tui/src/util/session.ts b/packages/tui/src/util/session.ts
+index 1c881d83ddc8b30f81d74295d84c09e9e0cda9f4..415abbed4853357e1394ff6adf7ae8d9493b2736 100644
+--- a/packages/tui/src/util/session.ts
++++ b/packages/tui/src/util/session.ts
+@@ -1,4 +1,4 @@
+-import type { JobInfo, ModelInfo, SessionMessageInfo } from "@opencode/client"
++import type { JobInfo, ModelInfo, ProviderInfo, SessionMessageInfo } from "@opencode/client"
+ import { lastAssistantWithUsage } from "@opencode/client/solid"
+ import { Locale } from "./locale"
+ 
+@@ -47,6 +47,7 @@ export function contextUsage(
+   messages: ReadonlyArray<SessionMessageInfo>,
+   models: ReadonlyArray<ModelInfo> | undefined,
+   boundary?: string,
++  providers?: ReadonlyArray<ProviderInfo>,
+ ) {
+   const last = lastAssistantWithUsage(messages, boundary)
+   if (!last) return
+@@ -54,9 +55,13 @@ export function contextUsage(
+     last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
+   if (tokens <= 0) return
+   const model = models?.find((model) => model.providerID === last.model.providerID && model.id === last.model.id)
++  const provider = providers?.find((provider) => provider.id === last.model.providerID)
+   return {
+     tokens,
+     percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : undefined,
++    // The provider writes the cache when it reads the request, so the lifetime starts at the message.
++    created: last.time.created,
++    ttl: model?.settings?.cache?.ttl ?? provider?.settings?.cache?.ttl,
+   }
+ }
+ 
+diff --git a/packages/tui/test/feature-plugins/prompt-footer.test.tsx b/packages/tui/test/feature-plugins/prompt-footer.test.tsx
+index 7abbe9da51d1664372a403e21f6fc26033f90cd2..5c106e06c49dae9d3520df81ece90e94cf5e7eed 100644
+--- a/packages/tui/test/feature-plugins/prompt-footer.test.tsx
++++ b/packages/tui/test/feature-plugins/prompt-footer.test.tsx
+@@ -40,6 +40,7 @@ test("prompt footer separates simultaneous subagent, shell, and usage status", a
+       },
+       location: {
+         model: { list: () => [] },
++        provider: { list: () => [] },
+       },
+     },
+   } as unknown as Context
+@@ -84,14 +85,21 @@ test("prompt footer separates simultaneous subagent, shell, and usage status", a
+   }
+ })
+ 
+-test("prompt footer can hide details", async () => {
++test.each([
++  ["model cache lifetime", "5m", undefined, true],
++  ["provider cache lifetime", undefined, "5m", true],
++  ["no cache lifetime", undefined, undefined, false],
++] as const)("prompt footer shows cache age: %s", async (_name, modelTTL, providerTTL, expired) => {
+   const color = RGBA.fromInts(200, 200, 200)
++  const warning = RGBA.fromInts(255, 160, 40)
++  const created = Date.now() - 6 * 60_000
+   const context = {
+     location: { directory: "/workspace" },
+     theme: {
+       text: {
+         base: color,
+         muted: color,
++        feedback: { warning: { base: warning } },
+       },
+     },
+     keymap: {
+@@ -115,6 +123,7 @@ test("prompt footer can hide details", async () => {
+               id: "message",
+               type: "assistant",
+               model: { providerID: "provider", id: "model" },
++              time: { created },
+               tokens: { input: 1_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+             },
+           ],
+@@ -123,7 +132,17 @@ test("prompt footer can hide details", async () => {
+       job: { list: () => [] },
+       shell: { list: () => [] },
+       location: {
+-        model: { list: () => [{ providerID: "provider", id: "model", limit: { context: 10_000 } }] },
++        model: {
++          list: () => [
++            {
++              providerID: "provider",
++              id: "model",
++              limit: { context: 10_000 },
++              settings: { cache: { ttl: modelTTL } },
++            },
++          ],
++        },
++        provider: { list: () => [{ id: "provider", settings: { cache: { ttl: providerTTL } } }] },
+       },
+     },
+   } as unknown as Context
+@@ -143,7 +162,14 @@ test("prompt footer can hide details", async () => {
+ 
+   try {
+     await app.renderOnce()
+-    expect(app.captureCharFrame()).toContain("1.0K (10%) · $1.00")
++    expect(app.captureCharFrame()).toContain("1.0K (10%) · 6m · $1.00")
++    expect(
++      app
++        .captureSpans()
++        .lines.flatMap((line) => line.spans)
++        .filter((span) => span.fg.equals(warning))
++        .map((span) => span.text),
++    ).toEqual(expired ? ["6m"] : [])
+     expect(app.captureCharFrame()).toContain("ctrl+p commands")
+ 
+     setShowDetails(false)
+@@ -204,7 +230,7 @@ test("prompt footer shows the session's goal without its objective and opens it
+       },
+       job: { list: () => [] },
+       shell: { list: () => [] },
+-      location: { model: { list: () => [] } },
++      location: { model: { list: () => [] }, provider: { list: () => [] } },
+     },
+   } as unknown as Context
+   const app = await testRender(
+@@ -284,7 +310,7 @@ test("prompt footer counts scripts, subagents with jobs, and shells and opens th
+         ],
+       },
+       shell: { list: () => [{ metadata: { sessionID: "session" } }, { metadata: { sessionID: "session" } }] },
+-      location: { model: { list: () => [] } },
++      location: { model: { list: () => [] }, provider: { list: () => [] } },
+     },
+   } as unknown as Context
+   const app = await testRender(
+diff --git a/packages/tui/test/feature-plugins/sidebar-context.test.tsx b/packages/tui/test/feature-plugins/sidebar-context.test.tsx
+index de5ecdffd990e0d6e5b2983bc4bf72dc95f142a3..2dee5bad591ffb56fb8c0ada4e837220450f2b2c 100644
+--- a/packages/tui/test/feature-plugins/sidebar-context.test.tsx
++++ b/packages/tui/test/feature-plugins/sidebar-context.test.tsx
+@@ -21,6 +21,7 @@ function context(options?: { cost?: number; tokens?: number }) {
+                     id: "message",
+                     type: "assistant",
+                     model: { providerID: "provider", id: "model" },
++                    time: { created: Date.now() },
+                     tokens: {
+                       input: options.tokens,
+                       output: 0,
+@@ -34,6 +35,7 @@ function context(options?: { cost?: number; tokens?: number }) {
+       },
+       location: {
+         model: { list: () => [] },
++        provider: { list: () => [] },
+       },
+     },
+   } as unknown as Context
+diff --git a/packages/util/src/duration.test.ts b/packages/util/src/duration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..09cd99e368e364e108e06ff4053be01d58b031ca
+--- /dev/null
++++ b/packages/util/src/duration.test.ts
+@@ -0,0 +1,77 @@
++import { describe, expect, test } from "bun:test"
++import { cacheMilliseconds, duration, durationCoarse, idleState } from "./duration.js"
++
++describe("duration", () => {
++  test("picks the unit the value belongs to", () => {
++    expect(duration(850)).toBe("850ms")
++    expect(duration(12_400)).toBe("12.4s")
++    expect(duration(185_000)).toBe("3m 5s")
++    expect(duration(7_800_000)).toBe("2h 10m")
++    expect(duration(100_800_000)).toBe("1d 4h")
++  })
++})
++
++describe("durationCoarse", () => {
++  test("has no value below a minute, so the caller can word it", () => {
++    expect(durationCoarse(0)).toBeUndefined()
++    expect(durationCoarse(59_999)).toBeUndefined()
++  })
++
++  test("drops the units a minute tick never shows moving", () => {
++    expect(durationCoarse(60_000)).toBe("1m")
++    expect(durationCoarse(185_000)).toBe("3m")
++    expect(durationCoarse(7_800_000)).toBe("2h 10m")
++    expect(durationCoarse(100_800_000)).toBe("1d 4h")
++  })
++})
++
++describe("cacheMilliseconds", () => {
++  test("reads the durations a cache.ttl carries", () => {
++    expect(cacheMilliseconds("5m")).toBe(300_000)
++    expect(cacheMilliseconds("1h")).toBe(3_600_000)
++    expect(cacheMilliseconds("90s")).toBe(90_000)
++    expect(cacheMilliseconds("500ms")).toBe(500)
++    expect(cacheMilliseconds("2d")).toBe(172_800_000)
++  })
++
++  test("has no value when it cannot be read, so nothing assumes a lifetime", () => {
++    expect(cacheMilliseconds(undefined)).toBeUndefined()
++    expect(cacheMilliseconds("")).toBeUndefined()
++    expect(cacheMilliseconds("5 minutes")).toBeUndefined()
++    expect(cacheMilliseconds("m")).toBeUndefined()
++    expect(cacheMilliseconds("5w")).toBeUndefined()
++    expect(cacheMilliseconds("-5m")).toBeUndefined()
++  })
++})
++
++const now = 1_000_000_000
++
++describe("idleState", () => {
++  test("counts from the request that wrote the cache", () => {
++    expect(idleState({ created: now - 185_000, ttl: undefined, now })).toEqual({ age: 185_000, expired: false })
++  })
++
++  test("has no state for a session with no response yet", () => {
++    expect(idleState({ created: undefined, ttl: "5m", now })).toBeUndefined()
++  })
++
++  test("never claims a lifetime the model does not declare", () => {
++    expect(idleState({ created: now - 3_600_000, ttl: undefined, now })).toEqual({
++      age: 3_600_000,
++      expired: false,
++    })
++  })
++
++  test("expires only after the declared lifetime, not at it", () => {
++    expect(idleState({ created: now - 300_000, ttl: "5m", now })?.expired).toBe(false)
++    expect(idleState({ created: now - 300_001, ttl: "5m", now })?.expired).toBe(true)
++  })
++
++  test("reads an hour-long lifetime as an hour", () => {
++    expect(idleState({ created: now - 3_000_000, ttl: "1h", now })?.expired).toBe(false)
++  })
++
++  test("clamps a clock that moved backwards instead of showing a negative age", () => {
++    expect(idleState({ created: now + 5_000, ttl: "5m", now })).toEqual({ age: 0, expired: false })
++  })
++})
+diff --git a/packages/util/src/duration.ts b/packages/util/src/duration.ts
+index 2a27f5560c119358c33db25e9a92975fc065bbe8..4012bf65d81b2976e70db6217940a646db5424f1 100644
+--- a/packages/util/src/duration.ts
++++ b/packages/util/src/duration.ts
+@@ -20,3 +20,60 @@ export function duration(input: number) {
+   const hours = Math.floor((input % 86400000) / 3600000)
+   return `${days}d ${hours}h`
+ }
++
++/**
++ * Elapsed time for a surface that refreshes once a minute, e.g. `1m`, `3h 12m` or `2d 4h`.
++ * Undefined below a minute, where a caller supplies its own wording instead of showing a frozen count.
++ */
++export function durationCoarse(input: number) {
++  if (input < 60000) {
++    return
++  }
++  if (input < 3600000) {
++    return `${Math.floor(input / 60000)}m`
++  }
++  if (input < 86400000) {
++    const hours = Math.floor(input / 3600000)
++    const minutes = Math.floor((input % 3600000) / 60000)
++    return `${hours}h ${minutes}m`
++  }
++  const days = Math.floor(input / 86400000)
++  const hours = Math.floor((input % 86400000) / 3600000)
++  return `${days}d ${hours}h`
++}
++
++const CACHE_UNITS = { ms: 1, s: 1000, m: 60000, h: 3600000, d: 86400000 } as const
++
++type CacheUnit = keyof typeof CACHE_UNITS
++
++const isCacheUnit = (value: string): value is CacheUnit => value in CACHE_UNITS
++
++/**
++ * Milliseconds a prompt cache lives, from a `cache.ttl` such as `5m` or `1h`.
++ * Undefined when the value is absent or not a duration, so a caller never assumes a lifetime.
++ */
++export function cacheMilliseconds(ttl: string | undefined) {
++  const match = ttl?.match(/^(\d+)(ms|s|m|h|d)$/)
++  if (!match) {
++    return
++  }
++  const unit = match[2]
++  if (!isCacheUnit(unit)) {
++    return
++  }
++  return Number(match[1]) * CACHE_UNITS[unit]
++}
++
++/**
++ * How long ago the last response's request was read, and whether the cache lifetime the model or provider declares
++ * has already passed. `expired` stays false when no lifetime is declared: a surface never claims one.
++ */
++export function idleState(input: { created: number | undefined; ttl: string | undefined; now: number }) {
++  if (input.created === undefined) {
++    return
++  }
++  const age = Math.max(0, input.now - input.created)
++  const lifetime = cacheMilliseconds(input.ttl)
++
++  return { age, expired: lifetime !== undefined && age > lifetime }
++}
